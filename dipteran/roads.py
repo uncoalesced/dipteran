@@ -39,7 +39,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dipteran.config import Config, haversine_m, load_config
+from dipteran.config import Config, load_config
 
 OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",

@@ -59,7 +59,7 @@ How the fly navigates without turn-by-turn GPS, and how simulated Bangalore traf
 | Traffic gridlock (zero motion despite throttle) | Lobula Plate Tangential Cells (LPTCs), optic flow | Optic flow is derived from the fly-vehicle's actual displacement each tick inside SUMO's simulated traffic. Zero flow while attempting to move (stuck behind a SUMO-simulated jam) reads as being trapped in a spider web/sap — escalates into sustained panic convulsions. |
 | Auto-rickshaw / vehicle cutting in | LC4 / LPLC2 looming detectors → Giant Fiber (DNp01) | Geometric near-collision detection between the fly-vehicle and nearby SUMO agents: rapid angular expansion of an agent in the forward field fires directly into DNp01, forcing instantaneous hard braking or an uncontrolled swerve. |
 | Potholes / broken roads | Chordotonal organ & campaniform sensilla (mechanosensory) | Vertical acceleration spikes (synthetic hazard triggers on specific edges) trigger grooming/freezing circuits, temporarily disabling forward movement. |
-| Horn blasts (500–800 Hz) | Johnston's Organ → acoustic projection neurons (aPNs) | Synthetic horn events (proximity-triggered by nearby SUMO agents) fall inside the fly's natural courtship/predator-warning frequency band; destabilize the internal compass. |
+| Horn blasts (500–800 Hz) | Johnston's Organ → the sound-sensitive JO-A/JO-B afferents | Synthetic horn events (proximity-triggered by nearby SUMO agents) fall inside the fly's natural courtship/predator-warning frequency band; destabilize the internal compass. **Correction from Phase 1**: this row originally said "acoustic projection neurons (aPNs)", but no aPN label exists in FlyWire v783. The release instead curates `cell_sub_class = auditory` — 390 sensory neurons, all `JO-A*`/`JO-B*` cell types, as distinct from the JO-C/D/E wind-and-gravity and grooming subgroups of the same organ. Current is injected there, which is where sound actually enters the brain. |
 
 ## 4. Motor Decoding
 
@@ -71,7 +71,9 @@ Three motor neuron clusters are read out of the simulation every tick:
 
   Under the hybrid motion model, this torque continuously rotates the vehicle's free heading; a separate soft force pulls position back toward the nearest road edge, so the vehicle can wander (matching the "wrong turns down unpaved alleys" framing) without fully decoupling from the road network.
 
-- **Acceleration / Brake** — forward wing-motor circuits (B1, B2) set throttle. If the **Giant Fiber (DNp01)** fires, override throttle to 0 and apply full emergency braking.
+- **Acceleration / Brake** — throttle is read from **DNg02** (subtypes `DNg02_a`…`DNg02_h`, 25 neurons), the descending population that sets wingbeat amplitude. If the **Giant Fiber (DNp01)** fires, override throttle to 0 and apply full emergency braking.
+
+  **Correction from Phase 1**: this originally read "forward wing-motor circuits (B1, B2)". The b1 and b2 basalar wing motor neurons are in the ventral nerve cord, and FAFB/FlyWire is a brain-only volume — they are not in this dataset and cannot be. DNg02 is the brain-side equivalent, and is what the code resolves. Wiring the actual wing motor neurons would mean bringing in the MANC ventral-nerve-cord connectome, which is a separate dataset and out of scope.
 
 ### Reinforcement loop (no backpropagation)
 
@@ -259,17 +261,18 @@ Resolved 2026-09-12 via a design-review interview. Recorded so later contributor
 
 Phases are dependency-ordered; each should be a mergeable milestone.
 
-**Phase 1 — Basic Build & Backend Foundations**
-- Get the repo skeleton running: the existing mock `main.py` + `index.html` scaffold, end to end, as the baseline before real work starts.
-- Document hardware requirement (CUDA GPU, VRAM sized for a ~139k-node sparse adjacency matrix run alongside SUMO).
-- FlyWire/CAVE account setup instructions (data use agreement, API credentials) — not bundled, user-provided.
-- Install SUMO, OSMnx, networkx, CUDA-enabled torch, FastAPI.
-- Extract the OSMnx/networkx graph for the configured A→B route.
-- Build the SUMO network via `netconvert` from the same OSM extract.
-- Build the ID-mapping layer between OSMnx edges/nodes and SUMO edges/lanes (join on shared OSM way/node IDs).
-- Script to pull the full connectivity graph via the CAVE API under the user's own FlyWire credentials; build the GPU-resident sparse adjacency matrix (`W`).
-- Resolve named clusters to real FlyWire cell IDs via Codex/CAVE annotation search, producing the `sensory_ids`/`motor_ids` lookup tables.
-- **Risk**: the OSMnx↔SUMO ID mapping is an unproven integration point — budget extra time here.
+**Phase 1 — Basic Build & Backend Foundations** — complete. Measured results in [`PHASE1_REPORT.md`](PHASE1_REPORT.md); `python check_phase1.py` re-asserts every item below.
+
+- [x] Get the repo skeleton running: the mock `main.py` + `index.html` scaffold, end to end, as the baseline before real work starts.
+- [x] Document hardware requirement (CUDA GPU, VRAM sized for a ~139k-node sparse adjacency matrix run alongside SUMO).
+- [x] FlyWire data-access instructions — `DATA_LICENSE.md`. An account turned out not to be required; the v783 archive and the annotation table are both openly downloadable, and `dipteran/connectome.py` fetches them.
+- [x] Install SUMO, OSMnx, networkx, CUDA-enabled torch, FastAPI.
+- [x] Extract the OSMnx/networkx graph for the configured A→B route.
+- [x] Build the SUMO network via `netconvert` from the same OSM extract — literally the same local `.osm.xml`, not a second download.
+- [x] Build the ID-mapping layer between OSMnx edges and SUMO edges: way-ID index from `origId`, then geometry refinement.
+- [x] Fetch the connectivity graph and build the GPU-resident sparse adjacency matrix (`W`), one signed weight per connected neuron pair.
+- [x] Resolve named clusters to real FlyWire root IDs from the v783 annotation table, producing the `sensory_ids`/`motor_ids` lookup tables.
+- ~~**Risk**: the OSMnx↔SUMO ID mapping is an unproven integration point~~ — it was indeed the hard part and did need custom code; see §11.
 
 **Phase 2 — Finish the Backend**
 - Implement `FlyBangaloreNavigator` against the real adjacency matrix on GPU.

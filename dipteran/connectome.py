@@ -74,7 +74,6 @@ FLYWIRE_SOURCES: dict[str, Source] = {
 PRE_COLUMNS = ("pre_pt_root_id", "pre_root_id", "pre_id", "pre")
 POST_COLUMNS = ("post_pt_root_id", "post_root_id", "post_id", "post")
 COUNT_COLUMNS = ("syn_count", "n_syn", "synapses", "count", "weight")
-NT_NAMES = ("ach", "gaba", "glut", "oct", "ser", "da")
 
 # Drosophila fast synaptic transmission: acetylcholine is excitatory, GABA is
 # inhibitory, and glutamate is treated as inhibitory because the dominant
@@ -83,8 +82,22 @@ NT_NAMES = ("ach", "gaba", "glut", "oct", "ser", "da")
 # neuromodulatory rather than fast-ionotropic; they are left excitatory-signed
 # here, which is a placeholder -- PAM/PPL1 dopamine is supposed to act on
 # synaptic *weights* in Phase 2, not as a direct current.
-NT_SIGN = {"ach": 1.0, "gaba": -1.0, "glut": -1.0,
-           "oct": 1.0, "ser": 1.0, "da": 1.0}
+#
+# Signs are taken per *presynaptic neuron* from the annotation table's
+# consensus `top_nt`, not per synapse. That follows Dale's principle -- one
+# neuron releases one fast transmitter -- and the per-neuron consensus is far
+# less noisy than the per-synapse prediction. It is also much cheaper: the
+# edge list's six per-transmitter probability columns over 16.8M rows do not
+# need to be read or reduced at all.
+NT_SIGN = {
+    "acetylcholine": 1.0,
+    "gaba": -1.0,
+    "glutamate": -1.0,
+    "octopamine": 1.0,
+    "serotonin": 1.0,
+    "dopamine": 1.0,
+}
+UNKNOWN_NT_SIGN = 1.0
 
 TORCH_DTYPES = {"float16": "float16", "float32": "float32", "bfloat16": "bfloat16"}
 
@@ -136,12 +149,22 @@ CLUSTERS: dict[str, Cluster] = {
         "sensory", (r"^LPLC2$",),
         note="LPLC2 looming detector; drives DNp01.",
     ),
-    "acoustic_apn": Cluster(
-        "sensory", (r"^aPN\d*$",),
-        fallbacks=((r"^JO-[A-F]$",
-                    "auditory PNs absent under that name; falling back to the "
-                    "Johnston's organ afferents themselves"),),
-        note="Johnston's organ auditory pathway; the horn-blast input.",
+    "acoustic_jo": Cluster(
+        "sensory", (r"^auditory$",),
+        fallbacks=((r"^JO-[AB]",
+                    "cell_sub_class 'auditory' missing; falling back to the "
+                    "JO-A/JO-B cell types by name"),),
+        note=(
+            "Johnston's organ auditory pathway; the horn-blast input. PLAN.md "
+            "calls this 'acoustic projection neurons (aPNs)', but no aPN label "
+            "exists in v783. What the release does curate is "
+            "cell_sub_class='auditory': 390 neurons, every one a JO-A*/JO-B* "
+            "type with super_class='sensory' -- the sound-sensitive Johnston's "
+            "organ subgroups, as opposed to the JO-C/D/E wind-and-gravity and "
+            "grooming subgroups in the same organ. These are afferents rather "
+            "than projection neurons, which makes them the better injection "
+            "site anyway: it is where sound actually enters the brain."
+        ),
     ),
     # -- motor -------------------------------------------------------------
     "steer_l_dna01": Cluster(
@@ -158,12 +181,14 @@ CLUSTERS: dict[str, Cluster] = {
     ),
     "throttle": Cluster(
         "motor", (r"^(b1|b2|MN ?b1|MN ?b2)$",),
-        fallbacks=((r"^DNg02$",
+        fallbacks=((r"^DNg02",
                     "b1/b2 are basalar wing motor neurons in the ventral nerve "
                     "cord, and FAFB/FlyWire is a brain-only volume, so they "
-                    "cannot be in this dataset. DNg02 is the brain-side "
+                    "cannot be in this dataset at all. DNg02 is the brain-side "
                     "descending population that sets wingbeat amplitude -- the "
-                    "closest thing to a throttle that exists in the brain."),),
+                    "closest thing to a throttle that exists in the brain. "
+                    "Matched as a prefix because v783 splits it into the "
+                    "subtypes DNg02_a through DNg02_h."),),
         note="Throttle. See the fallback note: PLAN.md's B1/B2 are not in FAFB.",
     ),
     "reward_pam": Cluster(
@@ -254,83 +279,111 @@ def _pick(columns, candidates, what: str) -> str:
     )
 
 
-def _nt_columns(columns) -> dict[str, str]:
-    """Map neurotransmitter name -> its probability column, if present."""
-    lowered = {c.lower(): c for c in columns}
-    found: dict[str, str] = {}
-    for nt in NT_NAMES:
-        for suffix in ("_avg", "", "_prob", "_probability"):
-            key = f"{nt}{suffix}"
-            if key in lowered:
-                found[nt] = lowered[key]
-                break
-    return found
+def neuron_signs(cfg: Config) -> dict[int, float]:
+    """Presynaptic root ID -> synaptic sign, from the annotation consensus."""
+    frame, _ = load_annotations(cfg)
+    if "top_nt" not in frame.columns:
+        raise KeyError(
+            f"{cfg.paths.cell_annotations.name} has no top_nt column; cannot "
+            "sign the adjacency matrix"
+        )
+    ids = frame["root_id"].fillna("")
+    nts = frame["top_nt"].fillna("").str.strip().str.lower()
+    mix = dict(nts.value_counts())
+    unknown = sorted(set(nts) - set(NT_SIGN) - {""})
+    if unknown:
+        print(f"[conn] transmitters with no sign rule, treated as "
+              f"{UNKNOWN_NT_SIGN:+.0f}: {unknown}", flush=True)
+    print(f"[conn] annotated transmitter mix: "
+          f"{ {k: int(v) for k, v in mix.items() if k} }", flush=True)
+    return {
+        int(root_id): NT_SIGN.get(nt, UNKNOWN_NT_SIGN)
+        for root_id, nt in zip(ids, nts)
+        if str(root_id).isdigit()
+    }
 
 
-def aggregate_pairs(cfg: Config) -> dict:
+def aggregate_pairs(cfg: Config, signed: bool = True,
+                    min_syn_count: int | None = None) -> dict:
     """Collapse the edge list to one signed weight per connected pair.
 
     The v783 release splits each connected pair across neuropils; summing
     those gives the aggregate synapse count, which is the single number this
     project wants per pair. There is deliberately no per-synapse matrix here:
-    54.5M synapses collapse to a few million connected pairs, and it is the
-    pairs that define the adjacency structure.
+    54.5M synapses collapse to 15.1M connected pairs, and it is the pairs that
+    define the adjacency structure.
+
+    Only three columns are read. Signs come from the presynaptic neuron's
+    annotated transmitter (see NT_SIGN), so the six per-transmitter
+    probability columns never have to be loaded or reduced over 16.8M rows.
+
+    `min_syn_count` drops weak pairs. The median pair in v783 has just *two*
+    synapses, and the FlyWire papers conventionally treat >=5 as the threshold
+    for a reliable connection -- below that, a "connection" is within the
+    noise of segmentation and synapse detection. The default comes from
+    config.yaml and is 0, keeping everything, because PLAN.md's standing
+    decision is maximum fidelity over a curated subset. Raise it if the weak
+    tail turns out to dominate Phase 2's dynamics.
     """
     import pyarrow.feather as feather
 
     path = cfg.paths.connectome_edges
-    schema = feather.read_table(path, memory_map=True).schema
-    columns = list(schema.names)
+    columns = list(feather.read_table(path, memory_map=True).schema.names)
     pre_col = _pick(columns, PRE_COLUMNS, "presynaptic root id")
     post_col = _pick(columns, POST_COLUMNS, "postsynaptic root id")
     count_col = _pick(columns, COUNT_COLUMNS, "synapse count")
-    nt_cols = _nt_columns(columns)
     print(f"[conn] {path.name}: pre={pre_col} post={post_col} "
-          f"count={count_col} nt={sorted(nt_cols)}", flush=True)
+          f"count={count_col}", flush=True)
 
-    wanted = [pre_col, post_col, count_col, *nt_cols.values()]
     started = time.monotonic()
-    frame = feather.read_table(path, columns=wanted, memory_map=True).to_pandas()
+    frame = feather.read_table(
+        path, columns=[pre_col, post_col, count_col], memory_map=True,
+    ).to_pandas()
     print(f"[conn] read {len(frame):,} (pair, neuropil) rows in "
           f"{time.monotonic() - started:.0f}s", flush=True)
 
-    # Synapse counts sum over neuropils; neurotransmitter probabilities are
-    # averaged weighted by those counts, so a pair's sign comes from where its
-    # synapses actually are.
-    counts = frame[count_col].astype(np.float64)
-    for col in nt_cols.values():
-        frame[col] = frame[col].astype(np.float64) * counts
-    frame[count_col] = counts
-    grouped = frame.groupby([pre_col, post_col], sort=True, as_index=False).sum()
+    grouped = frame.groupby([pre_col, post_col], sort=True, as_index=False,
+                            observed=True).sum()
     del frame
 
     pre = grouped[pre_col].to_numpy(dtype=np.int64)
     post = grouped[post_col].to_numpy(dtype=np.int64)
     total = grouped[count_col].to_numpy(dtype=np.float64)
-
-    if nt_cols:
-        order = sorted(nt_cols)
-        probs = np.column_stack([
-            grouped[nt_cols[nt]].to_numpy(dtype=np.float64) / np.maximum(total, 1.0)
-            for nt in order
-        ])
-        top = np.asarray(order, dtype=object)[probs.argmax(axis=1)]
-        signs = np.asarray([NT_SIGN.get(nt, 1.0) for nt in top])
-        nt_mix = {nt: int((top == nt).sum()) for nt in order}
-    else:
-        print("[conn] no neurotransmitter columns; leaving all weights "
-              "excitatory (Phase 2 must revisit)", flush=True)
-        top = np.full(len(total), "unknown", dtype=object)
-        signs = np.ones(len(total))
-        nt_mix = {}
-
     del grouped
+
+    threshold = cfg.compute.min_syn_count if min_syn_count is None else min_syn_count
+    if threshold > 1:
+        keep = total >= threshold
+        print(f"[conn] min_syn_count={threshold}: keeping "
+              f"{int(keep.sum()):,} of {len(total):,} pairs "
+              f"({keep.mean():.1%})", flush=True)
+        pre, post, total = pre[keep], post[keep], total[keep]
+
+    if signed:
+        signs_by_id = neuron_signs(cfg)
+        signs = np.fromiter(
+            (signs_by_id.get(int(p), UNKNOWN_NT_SIGN) for p in pre),
+            dtype=np.float64, count=len(pre),
+        )
+        unannotated = sum(1 for p in pre if int(p) not in signs_by_id)
+        n_inhibitory = int((signs < 0).sum())
+        print(f"[conn] {n_inhibitory:,} inhibitory / "
+              f"{len(signs) - n_inhibitory:,} excitatory pairs; "
+              f"{unannotated:,} pairs had an unannotated presynaptic neuron",
+              flush=True)
+    else:
+        signs = np.ones(len(total))
+        n_inhibitory = 0
+        unannotated = 0
+
     print(f"[conn] {len(total):,} connected neuron pairs, "
           f"{total.sum():,.0f} synapses total", flush=True)
-    print(f"[conn] predicted transmitter mix: {nt_mix}", flush=True)
     return {
-        "pre": pre, "post": post, "count": total,
-        "sign": signs, "nt": top, "nt_mix": nt_mix,
+        "pre": pre, "post": post, "count": total, "sign": signs,
+        "inhibitory_pairs": n_inhibitory,
+        "unannotated_presynaptic": unannotated,
+        "synapses_total": float(total.sum()),
+        "min_syn_count": int(threshold),
     }
 
 
@@ -340,13 +393,13 @@ def build_adjacency(cfg: Config, pairs: dict | None = None,
     import torch
     from scipy.sparse import coo_matrix
 
-    pairs = pairs if pairs is not None else aggregate_pairs(cfg)
+    pairs = pairs if pairs is not None else aggregate_pairs(cfg, signed=signed)
 
     neurons = np.union1d(pairs["pre"], pairs["post"])
     n = len(neurons)
     rows = np.searchsorted(neurons, pairs["post"])   # postsynaptic -> row
     cols = np.searchsorted(neurons, pairs["pre"])    # presynaptic  -> column
-    values = pairs["count"] * (pairs["sign"] if signed else 1.0)
+    values = pairs["count"] * pairs["sign"]
 
     cfg.paths.neuron_index.parent.mkdir(parents=True, exist_ok=True)
     np.save(cfg.paths.neuron_index, neurons)
@@ -399,6 +452,11 @@ def build_adjacency(cfg: Config, pairs: dict | None = None,
         "peak_allocated_bytes": int(peak),
         "vram_total_bytes": int(total_vram),
         "vram_used_by_build_bytes": int(free_before - free_after),
+        "inhibitory_pairs": int(pairs["inhibitory_pairs"]),
+        "unannotated_presynaptic": int(pairs["unannotated_presynaptic"]),
+        "synapses_total": int(pairs["synapses_total"]),
+        "synapses_per_pair": round(pairs["synapses_total"] / max(nnz, 1), 3),
+        "min_syn_count": int(pairs["min_syn_count"]),
     }
     print(f"[gpu] W: {n:,} x {n:,}, {nnz:,} non-zeros "
           f"(density {stats['density']:.2e})", flush=True)

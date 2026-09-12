@@ -101,6 +101,10 @@ class Route(BaseModel):
 class Compute(BaseModel):
     device: str = "cuda:0"
     dtype: Literal["bfloat16", "float16", "float32"] = "float16"
+    # Drop connected pairs below this many aggregate synapses. 0 keeps
+    # everything (PLAN.md's maximum-fidelity decision); the FlyWire papers
+    # conventionally treat >=5 as a reliable connection.
+    min_syn_count: int = Field(default=0, ge=0)
 
 
 class Paths(BaseModel):

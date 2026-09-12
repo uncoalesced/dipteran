@@ -34,6 +34,12 @@ compute:
   device: cuda:0
   # fp16 values keep the adjacency matrix in the tens-of-MB range.
   dtype: float16
+  # Drop connected pairs below this many aggregate synapses. 0 keeps all
+  # 15.1M pairs, which is PLAN.md's maximum-fidelity decision. Note the
+  # median pair in v783 has only 2 synapses and the FlyWire papers treat
+  # >=5 as the threshold for a reliable connection -- raise this if the weak
+  # tail dominates Phase 2's dynamics.
+  min_syn_count: 0
 
 paths:
   data_dir: data

@@ -290,10 +290,16 @@ def check_connectome() -> dict:
     assert stats["neurons"] > 100_000, stats["neurons"]
     assert stats["nnz"] > 1_000_000, stats["nnz"]
     # The sizing decision this checks: an aggregate-per-pair matrix, not a
-    # per-synapse one. 54.5M synapses would not fit the claim below.
-    assert stats["nnz"] < 10_000_000, (
-        f"{stats['nnz']:,} non-zeros looks like a per-synapse matrix, not one "
-        "entry per connected neuron pair"
+    # per-synapse one. v783 has 54.5M synapses over 15.1M connected pairs, so
+    # "did aggregation happen" is the right question, not a raw nnz bound --
+    # a per-synapse matrix would have exactly one synapse per entry.
+    assert stats["synapses_per_pair"] > 1.0, (
+        f"{stats['synapses_per_pair']:.2f} synapses per non-zero -- this is a "
+        "per-synapse matrix, not one entry per connected neuron pair"
+    )
+    assert stats["nnz"] < 20_000_000, (
+        f"{stats['nnz']:,} non-zeros exceeds the number of connected pairs "
+        "in v783"
     )
     assert stats["matrix_bytes_allocated"] < stats["vram_total_bytes"] // 4, (
         "the matrix is using more than a quarter of VRAM; the sizing "
