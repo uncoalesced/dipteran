@@ -329,10 +329,14 @@ class SumoNet:
         self.origids: list[set[str]] = []
         lengths: list[float] = []
         shapes: list[list[tuple[float, float]]] = []
+        conn_from: list[str] = []
+        conn_to: list[str] = []
         self.skipped_no_shape = 0
-        self._parse(lengths, shapes)
+        self._parse(lengths, shapes, conn_from, conn_to)
 
         self.index = {edge_id: i for i, edge_id in enumerate(self.edge_ids)}
+        self._build_connections(conn_from, conn_to)
+        del conn_from, conn_to
         self.lengths = np.asarray(lengths, dtype=np.float64)
         counts = np.asarray([len(s) for s in shapes], dtype=np.int64)
         self._offsets = np.concatenate([[0], np.cumsum(counts)])
@@ -360,9 +364,17 @@ class SumoNet:
     # -- parsing ---------------------------------------------------------
 
     def _parse(self, lengths: list[float],
-               shapes: list[list[tuple[float, float]]]) -> None:
+               shapes: list[list[tuple[float, float]]],
+               conn_from: list[str], conn_to: list[str]) -> None:
         for _, elem in ET.iterparse(self.path, events=("end",)):
-            if elem.tag == "location":
+            if elem.tag == "connection":
+                source, target = elem.get("from", ""), elem.get("to", "")
+                if source and target and not source.startswith(":") \
+                        and not target.startswith(":"):
+                    conn_from.append(source)
+                    conn_to.append(target)
+                elem.clear()
+            elif elem.tag == "location":
                 off_x, off_y = elem.get("netOffset", "0,0").split(",")
                 self.offset_x, self.offset_y = float(off_x), float(off_y)
                 self.proj_params = elem.get("projParameter")
@@ -394,6 +406,65 @@ class SumoNet:
                 self.origids.append(origids)
                 lengths.append(length)
                 shapes.append(shape)
+
+    # -- connectivity ----------------------------------------------------
+
+    def _build_connections(self, conn_from: list[str],
+                           conn_to: list[str]) -> None:
+        """Edge-to-edge adjacency as a CSR pair of int32 arrays.
+
+        A dict of sets over ~1.5M connections costs a few hundred MB; two
+        int32 arrays cost ~12 MB, which matters because this network already
+        pushes the memory budget.
+        """
+        index = self.index
+        pairs = [(index[a], index[b]) for a, b in zip(conn_from, conn_to)
+                 if a in index and b in index]
+        n = len(self.edge_ids)
+        if not pairs:
+            self._conn_offsets = np.zeros(n + 1, dtype=np.int64)
+            self._conn_targets = np.zeros(0, dtype=np.int32)
+            return
+        sources = np.fromiter((p[0] for p in pairs), dtype=np.int32,
+                              count=len(pairs))
+        targets = np.fromiter((p[1] for p in pairs), dtype=np.int32,
+                              count=len(pairs))
+        order = np.argsort(sources, kind="stable")
+        self._conn_targets = targets[order]
+        counts = np.bincount(sources, minlength=n)
+        self._conn_offsets = np.concatenate([[0], np.cumsum(counts)])
+        print(f"[sumo] {len(pairs)} edge-to-edge connections", flush=True)
+
+    def successors(self, edge_index: int) -> np.ndarray:
+        start = self._conn_offsets[edge_index]
+        stop = self._conn_offsets[edge_index + 1]
+        return self._conn_targets[start:stop]
+
+    def reachable(self, from_edge: str, to_edge: str) -> tuple[bool, int]:
+        """(is `to_edge` reachable from `from_edge`, edges explored).
+
+        Breadth-first over SUMO's own `<connection>` elements, which encode
+        the permitted turns. This is the in-process answer to "are origin and
+        destination in the same routable component" -- duarouter gives the
+        authoritative route, but needs 4.4 GB to do it.
+        """
+        start, goal = self.index[from_edge], self.index[to_edge]
+        seen = np.zeros(len(self.edge_ids), dtype=bool)
+        seen[start] = True
+        frontier = [start]
+        explored = 0
+        while frontier:
+            nxt: list[int] = []
+            for edge_index in frontier:
+                explored += 1
+                if edge_index == goal:
+                    return True, explored
+                for target in self.successors(edge_index):
+                    if not seen[target]:
+                        seen[target] = True
+                        nxt.append(int(target))
+            frontier = nxt
+        return False, explored
 
     # -- projection ------------------------------------------------------
 
@@ -832,6 +903,25 @@ def verify_routable(cfg: Config, endpoints: dict | None = None,
          "--no-warnings", "true"],
         capture_output=True, text=True, check=False,
     )
+
+    # duarouter needs 4.4 GB to load this network, which in a 7.7 GiB WSL2 VM
+    # is enough to destabilise the whole guest. A negative return code means
+    # it was signalled, not that the network is unroutable -- that is an
+    # environment limit, and the caller has the in-process BFS for the actual
+    # connectivity claim. Reporting it as "not routable" would be a lie.
+    if result.returncode is not None and result.returncode < 0:
+        print(f"[route] duarouter was killed by signal "
+              f"{-result.returncode} (it peaks at ~4.4 GB on this network); "
+              f"falling back to the in-process connectivity check", flush=True)
+        return {
+            "from_edge": from_edge,
+            "to_edge": to_edge,
+            "origin_gap_m": endpoints["origin_gap_m"],
+            "destination_gap_m": endpoints["destination_gap_m"],
+            "duarouter": f"killed by signal {-result.returncode}",
+            "straight_line_km": round(cfg.route.separation_m / 1000, 2),
+        }
+
     if result.returncode != 0 or not routes.exists():
         raise AssertionError(
             f"duarouter could not route {from_edge} -> {to_edge} "
@@ -854,6 +944,7 @@ def verify_routable(cfg: Config, endpoints: dict | None = None,
         "to_edge": to_edge,
         "origin_gap_m": endpoints["origin_gap_m"],
         "destination_gap_m": endpoints["destination_gap_m"],
+        "duarouter": "ok",
         "route_edges": len(edges),
         "route_km": round(length / 1000, 2),
         "straight_line_km": round(cfg.route.separation_m / 1000, 2),
@@ -870,9 +961,17 @@ def main() -> None:
     print(f"[route] OSMnx origin node {orig} -> destination node {dest}",
           flush=True)
     endpoints = route_endpoint_edges(cfg, net)
+    connected, explored = net.reachable(endpoints["from_edge"],
+                                        endpoints["to_edge"])
+    print(f"[route] BFS over connections: destination reachable={connected} "
+          f"after exploring {explored:,} edges", flush=True)
+    assert connected, "origin and destination are in disconnected components"
     del graph, net
     gc.collect()
-    verify_routable(cfg, endpoints=endpoints)
+    # See check_phase1.check_sumo_net: duarouter wants ~4.4 GB on this
+    # network and will take a small WSL2 guest down with it.
+    if os.environ.get("DIPTERAN_DUAROUTER") == "1":
+        verify_routable(cfg, endpoints=endpoints)
     print("\nroads self-check OK")
 
 

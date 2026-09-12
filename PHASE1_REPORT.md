@@ -72,15 +72,37 @@ smaller component can be stranded. Phase 2's motion model has to cope.
 
 ### netconvert produces a valid, routable .net.xml — PASS
 
-862.0 MB, 385,141 non-internal edges, 1,065,099 shape points, projected
-`+proj=utm +zone=43 +ellps=WGS84`. 200 netconvert warnings, no fatal errors.
+862.0 MB, 385,141 non-internal edges, 1,065,099 shape points, 793,563
+edge-to-edge connections, projected `+proj=utm +zone=43 +ellps=WGS84`. 200
+netconvert warnings, no fatal errors.
 
 Exiting 0 is not the same as routable — netconvert is perfectly happy to emit
-a network whose components are disconnected. So the check asks SUMO itself:
-`duarouter` routes origin edge `1299917517` → destination edge
-`-307845469#2` in **135 edges, 14.49 km**. The origin coordinate lands 5.1 m
-from its SUMO edge and the destination 1.8 m from its own. That is the same
-query Phase 2's traffic demand will make.
+a network whose components are disconnected, so "no fatal topology errors"
+proves nothing on its own. Two independent answers, and the interesting part
+is why there are two:
+
+**In-process BFS over SUMO's own `<connection>` elements** (which encode the
+permitted turns): the origin coordinate snaps to edge `1299917517` 5.1 m
+away, the destination to `-307845469#2` 1.8 m away, and the destination is
+**reachable after exploring 178,131 edges**. This is the hard assertion, and
+it runs in 38 s inside the check.
+
+**duarouter**, run standalone, routes the same pair in **135 edges, 14.49 km**
+against a 10.59 km straight line. It is the authoritative SUMO answer and the
+same query Phase 2's demand generation will make — but it needs 4.42 GB of
+RSS to load this network (measured, `/usr/bin/time -v`), and on a 7.7 GiB
+WSL2 guest that reliably crashes the *guest*, not just the process. So it is
+opt-in:
+
+```bash
+DIPTERAN_DUAROUTER=1 python check_phase1.py --only sumo_net
+```
+
+Letting an environment memory limit fail a criterion the BFS already settles
+would have been the wrong call; so would reporting "not routable" when the
+truth is "the router could not be loaded here". `verify_routable` now
+distinguishes a negative return code (signalled) from a non-zero one
+(genuinely unroutable).
 
 ### Deterministic OSM-edge↔SUMO-edge lookup matching on geometry — PASS
 
