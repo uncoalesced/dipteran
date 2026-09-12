@@ -372,17 +372,31 @@ the same line every time. It took three runs and a standalone
 `/usr/bin/time -v` to pin down, having first been misread as two concurrent
 jobs (which was *also* happening, and which is what the earlier kills were).
 
-The fix is structural rather than a bigger VM: `route_endpoint_edges` now
-returns plain data — the two edge IDs and an edge→length map — so
-`check_sumo_net` can drop the network and `gc.collect()` before
-`verify_routable` spawns the subprocess. For the same reason the
-cross-check memoisation of the OSMnx graph and SUMO network was reverted:
-holding a 3–4 GB graph across checks to save a 25 s re-read is a bad trade at
-this memory budget.
+Three fixes, escalating, because the first two were not enough:
+
+1. `route_endpoint_edges` returns plain data — the two edge IDs and an
+   edge→length map — so the caller can drop the parsed network before
+   spawning a subprocess. Not sufficient on its own.
+2. The cross-check memoisation of the OSMnx graph and SUMO network was
+   reverted. Holding a 3–4 GB graph across checks to save a 25 s re-read is a
+   bad trade at this budget. Still not sufficient.
+3. **A subprocess per check.** This is the one that works. `gc.collect()`
+   frees the objects but CPython does not return the arenas to the OS, so RSS
+   stays at 3–4 GB after the OSMnx check and the *next* check starts near the
+   ceiling — the suite died parsing the `.net.xml`, having earlier died at
+   duarouter, each time looking like a different bug. `check_phase1.py` now
+   re-invokes itself once per check (`--worker`, writing its result to a temp
+   JSON) and merges the results. `--in-process` keeps the old behaviour for
+   anyone with the RAM.
+
+The lesson worth carrying: in a memory-capped guest, a checker that holds
+multi-gigabyte artefacts across steps is not slow, it is unreliable, and the
+failures do not point at the cause. Peak RSS per step, for reference: 3–4 GB
+OSMnx graph, ~2 GB parsing the `.net.xml`, 2.65 GiB connectome aggregation,
+4.42 GB duarouter.
 
 Phase 2 needs SUMO resident *alongside* the SNN, so raise the WSL allocation
-in `.wslconfig` before starting. For reference, peak RSS elsewhere: 2.65 GiB
-for the connectome aggregation, 3–4 GB for the OSMnx graph.
+in `.wslconfig` before starting.
 
 **WSL itself needed restarting once.** After the OOM kills, the distro came
 back but the WSL service started answering

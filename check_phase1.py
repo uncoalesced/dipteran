@@ -21,6 +21,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -450,6 +451,56 @@ def check_cell_ids() -> dict:
 
 # --------------------------------------------------------------------------
 
+def _run_check(name: str, criterion: str, func_name: str) -> dict:
+    """Run one check in this process and package its result."""
+    print(f"\n{'=' * 72}\n{name}: {criterion}\n{'=' * 72}", flush=True)
+    gc.collect()
+    started = time.monotonic()
+    try:
+        evidence = globals()[func_name]()
+        status, error = "PASS", None
+    except Exception as exc:
+        evidence, status, error = {}, "FAIL", f"{type(exc).__name__}: {exc}"
+        print(f"\n!! {error}", flush=True)
+    return {
+        "name": name, "criterion": criterion, "status": status,
+        "seconds": round(time.monotonic() - started, 2),
+        "evidence": evidence, "error": error,
+    }
+
+
+def _run_check_in_subprocess(name: str, criterion: str) -> dict:
+    """Run one check in a fresh interpreter.
+
+    Each check's peak is measured in gigabytes -- 3-4 GB for the OSMnx graph,
+    ~2 GB to parse the 862 MB .net.xml, 2.65 GB for the connectome
+    aggregation -- and CPython does not return freed arenas to the OS, so
+    running them in one process means the third check starts already near the
+    ceiling of a 7.7 GiB WSL2 guest and takes the guest down with it. A
+    process per check is the only thing that actually reclaims the memory.
+    """
+    handle, path = tempfile.mkstemp(suffix=".json", prefix="phase1_")
+    os.close(handle)
+    result_file = Path(path)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-W", "ignore", "-u", str(Path(__file__).resolve()),
+             "--only", name, "--worker", "--result-out", str(result_file)],
+            cwd=REPO_ROOT, check=False,
+        )
+        if result_file.exists() and result_file.stat().st_size:
+            return json.loads(result_file.read_text(encoding="utf-8"))
+        return {
+            "name": name, "criterion": criterion, "status": "FAIL",
+            "seconds": 0.0, "evidence": {},
+            "error": (f"worker exited {proc.returncode} without writing a "
+                      "result -- most likely killed for memory; see its "
+                      "output above"),
+        }
+    finally:
+        result_file.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", action="append", default=None,
@@ -458,6 +509,13 @@ def main() -> int:
                         help="skip these checks (repeatable)")
     parser.add_argument("--list", action="store_true",
                         help="list the checks and exit")
+    parser.add_argument("--in-process", action="store_true",
+                        help="run every check in this interpreter instead of "
+                             "one subprocess each (needs plenty of RAM)")
+    parser.add_argument("--worker", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--result-out", default=None,
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.list:
@@ -472,24 +530,21 @@ def main() -> int:
         print("no checks selected", file=sys.stderr)
         return 2
 
-    results = []
-    for name, criterion, func_name in selected:
-        print(f"\n{'=' * 72}\n{name}: {criterion}\n{'=' * 72}", flush=True)
-        # The previous check's road graph or dataframe is multi-gigabyte and
-        # the next one needs the headroom; do not wait for a lazy collection.
-        gc.collect()
-        started = time.monotonic()
-        try:
-            evidence = globals()[func_name]()
-            status, error = "PASS", None
-        except Exception as exc:
-            evidence, status, error = {}, "FAIL", f"{type(exc).__name__}: {exc}"
-            print(f"\n!! {error}", flush=True)
-        results.append({
-            "name": name, "criterion": criterion, "status": status,
-            "seconds": round(time.monotonic() - started, 2),
-            "evidence": evidence, "error": error,
-        })
+    if args.worker:
+        if len(selected) != 1 or not args.result_out:
+            print("--worker needs exactly one --only and a --result-out",
+                  file=sys.stderr)
+            return 2
+        result = _run_check(*selected[0])
+        Path(args.result_out).write_text(
+            json.dumps(result, default=str), encoding="utf-8")
+        return 0 if result["status"] == "PASS" else 1
+
+    if args.in_process or len(selected) == 1:
+        results = [_run_check(*entry) for entry in selected]
+    else:
+        results = [_run_check_in_subprocess(name, criterion)
+                   for name, criterion, _ in selected]
 
     cfg = load_config()
     out = cfg.paths.cache_dir / "phase1_evidence.json"
