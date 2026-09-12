@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gc
 import json
 import os
 import re
@@ -30,24 +31,24 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from dipteran.config import load_config  # noqa: E402
 
-# Parsing an 862 MB .net.xml and a 154 MB .graphml takes minutes each, and
-# four of the checks below want them. Build once per process.
-_CACHE: dict[str, object] = {}
+# These are deliberately NOT memoised across checks. The OSMnx graph costs
+# 3-4 GB resident and the parsed .net.xml about 1 GB, while `duarouter` wants
+# 3.85 GB of its own and the connectome aggregation 2.65 GB. WSL2 defaults to
+# half of host RAM -- 7.7 GiB here -- so holding both graphs for the whole run
+# gets the process OOM-killed partway through. Re-reading the cached .graphml
+# (~25 s) and .net.xml (~60 s) is the cheaper trade: each check's objects fall
+# out of scope when it returns.
 
 
 def _graph():
-    if "graph" not in _CACHE:
-        from dipteran.roads import build_osmnx_graph
-        _CACHE["graph"] = build_osmnx_graph(load_config())
-    return _CACHE["graph"]
+    from dipteran.roads import build_osmnx_graph
+    return build_osmnx_graph(load_config())
 
 
 def _net():
-    if "net" not in _CACHE:
-        from dipteran.roads import SumoNet, build_sumo_net
-        cfg = load_config()
-        _CACHE["net"] = SumoNet(build_sumo_net(cfg))
-    return _CACHE["net"]
+    from dipteran.roads import SumoNet, build_sumo_net
+    cfg = load_config()
+    return SumoNet(build_sumo_net(cfg))
 
 # Each check is (name, the exit criterion it answers, its function).
 CRITERIA: list[tuple[str, str, str]] = [
@@ -306,34 +307,52 @@ def check_connectome() -> dict:
         "assumption in the Phase 1 brief was wrong"
     )
 
-    # Ten sparse matmuls, the same shape of work one 20ms SNN tick does.
+    # Ten sparse matmuls is what one 20ms SNN tick costs under PLAN.md's LIF
+    # loop, so time it -- but time the *steady state*. The first calls pay
+    # cuSPARSE handle setup and algorithm selection, which made an earlier
+    # version of this check report 32ms per matmul against a true 0.94ms.
+    #
     # Weights are raw aggregate synapse counts (up to 2405) and in-degree runs
-    # to hundreds, so an unnormalised fp16 product saturates to inf within a
-    # couple of steps and every subsequent check would be measuring nothing.
-    # Rescaling to unit max each step keeps the kernel exercised on real
-    # values -- and is a standing note for Phase 2, whose LIF calibration has
-    # to scale these weights for the same reason.
-    started = time.monotonic()
+    # to hundreds, so the drive is rescaled to unit max each step. Without it
+    # an fp16 product saturates to inf within a couple of steps and everything
+    # downstream measures nothing. Phase 2's LIF calibration has to solve the
+    # same problem properly.
     v = torch.zeros(stats["neurons"], 1, dtype=w.dtype, device=w.device)
     v[::1000] = 1.0
+    for _ in range(5):
+        torch.sparse.mm(w, v)
+    torch.cuda.synchronize()
+
+    started = time.monotonic()
+    driven = v
     finite = True
     for _ in range(10):
-        v = torch.sparse.mm(w, v)
-        finite = finite and bool(torch.isfinite(v).all())
-        scale = v.abs().max()
+        driven = torch.sparse.mm(w, driven)
+        scale = driven.abs().max()
         if scale > 0:
-            v = v / scale
+            driven = driven / scale
     torch.cuda.synchronize()
     elapsed = time.monotonic() - started
+    finite = bool(torch.isfinite(driven).all())
+
     assert finite, (
         "sparse matmul produced inf/nan even with per-step rescaling; the "
         f"{cfg.compute.dtype} matrix cannot be driven at this weight scale"
     )
-    assert int((v != 0).sum()) > 0, "ten matmuls drove no neuron at all"
+    assert int((driven != 0).sum()) > 0, "ten matmuls drove no neuron at all"
+    # PLAN.md's tick budget is 20ms for 10 sub-ticks. Exceeding it does not
+    # make Phase 1 wrong, but it decides whether Phase 2 can run in real time.
+    tick_ms = elapsed * 1000
+    print(f"[gpu] 10 sub-ticks in {tick_ms:.1f} ms "
+          f"({tick_ms / 10:.3f} ms per matmul) against a 20 ms tick budget "
+          f"-> {20 / tick_ms:.2f}x real-time", flush=True)
 
     return {
         "matmul_stayed_finite": finite,
-        "driven_neurons_after_10_steps": int((v != 0).sum()),
+        "driven_neurons_after_10_steps": int((driven != 0).sum()),
+        "ms_per_sparse_mm": round(tick_ms / 10, 3),
+        "tick_ms_for_10_subticks": round(tick_ms, 2),
+        "realtime_factor_at_20ms_tick": round(20 / tick_ms, 2),
         **stats,
         "matrix_mib": round(stats["matrix_bytes_allocated"] / 2**20, 2),
         "predicted_mib": round(stats["matrix_bytes_predicted"] / 2**20, 2),
@@ -415,6 +434,9 @@ def main() -> int:
     results = []
     for name, criterion, func_name in selected:
         print(f"\n{'=' * 72}\n{name}: {criterion}\n{'=' * 72}", flush=True)
+        # The previous check's road graph or dataframe is multi-gigabyte and
+        # the next one needs the headroom; do not wait for a lazy collection.
+        gc.collect()
         started = time.monotonic()
         try:
             evidence = globals()[func_name]()

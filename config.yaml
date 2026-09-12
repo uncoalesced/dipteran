@@ -32,8 +32,14 @@ route:
 compute:
   # torch device for the connectome sparse matrix.
   device: cuda:0
-  # fp16 values keep the adjacency matrix in the tens-of-MB range.
-  dtype: float16
+  # Measured on an RTX 5050: fp32 costs 116.5 MiB against fp16's 87.3 MiB and
+  # is 5% slower per sparse matmul (0.989 vs 0.943 ms). Both are trivial
+  # against 8 GB, so fp32 is the default -- it removes a real hazard. Weights
+  # are raw aggregate synapse counts up to 2405 and in-degree runs to
+  # hundreds, so fp16 products saturate to inf within a couple of LIF
+  # sub-ticks unless every step is rescaled. Switch to float16 only if the
+  # 29 MiB matters.
+  dtype: float32
   # Drop connected pairs below this many aggregate synapses. 0 keeps all
   # 15.1M pairs, which is PLAN.md's maximum-fidelity decision. Note the
   # median pair in v783 has only 2 synapses and the FlyWire papers treat

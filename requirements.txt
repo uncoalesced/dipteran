@@ -1,0 +1,34 @@
+# Dipteran direct dependencies, pinned to the versions Phase 1 was verified
+# against. Transitive pins are deliberately left to the resolver.
+#
+# torch MUST come from the CUDA 12.8 index. The RTX 5050 this was built on is
+# Blackwell (compute capability sm_120) and pre-cu128 wheels ship no kernels
+# for it -- they import cleanly and then fail at the first kernel launch.
+#
+#   uv venv --python 3.12 .venv
+#   uv pip install -r requirements.txt
+#   uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+#
+# Not installable from here: SUMO. Install it from your package manager
+# (`apt-get install sumo sumo-tools sumo-doc`) so `netconvert` and
+# `duarouter` are on PATH, or set sumo.binary_dir in config.yaml.
+
+# Road network
+osmnx==2.1.1
+networkx==3.6.1
+pyproj==3.8.0
+scipy==1.18.1
+scikit-learn==1.9.1        # osmnx needs it for nearest_nodes on an unprojected graph
+
+# Connectome
+numpy==2.5.3
+pandas==3.0.5
+pyarrow==25.0.1
+
+# Config
+pydantic==2.13.5
+pyyaml==6.0.3
+
+# Server + frontend delivery
+fastapi==0.141.1
+uvicorn[standard]==0.52.4  # pulls websockets, which check_phase1.py uses as a client

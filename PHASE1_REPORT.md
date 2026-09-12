@@ -87,6 +87,68 @@ query Phase 2's traffic demand will make.
 This was flagged as the hardest, least-proven piece, and it was. Its own
 section below.
 
+### Connectome as a GPU-resident sparse CSR, VRAM logged — PASS
+
+`torch.sparse_csr_tensor` on `cuda:0`, **138,639 × 138,639** with
+**15,091,983 non-zeros** (density 7.85 × 10⁻⁴), from torch 2.11.0+cu128 on
+an RTX 5050 at compute capability **sm_120**.
+
+| dtype | matrix | predicted | VRAM consumed | of total |
+|---|---|---|---|---|
+| float16 | 87.3 MiB | 86.9 MiB | 90.0 MiB | 7.93 GiB |
+| float32 | 116.5 MiB | 115.7 MiB | 118.0 MiB | 7.93 GiB |
+
+Predicted against measured agrees to within 0.5%, which is the real check
+here — it confirms the matrix costs exactly `nnz × (value + int32 index) +
+(n+1) × int32` and nothing is quietly materialising dense.
+
+**The brief's sizing estimate was wrong; its conclusion was right.** It
+predicted ~2–3M non-zeros. The actual figure is **15,091,983** — about 5×
+more. 54,492,922 synapses (matching the documented 54.5M) collapse to 15.1M
+connected pairs, 3.61 synapses per pair. The reason the estimate was low is
+that the v783 edge list is mostly *weak* pairs: the median connected pair has
+just **two** synapses, and the FlyWire papers conventionally treat ≥5 as the
+threshold for a reliable connection. Thresholding there would land near the
+2–3M figure. The conclusion — "tens of MB, nowhere near the 8 GB budget" —
+survives unscathed at 5× the non-zeros, so nothing needed rethinking, but
+`compute.min_syn_count` now exists as a knob (default 0, honouring PLAN.md's
+maximum-fidelity decision).
+
+**Signs come per presynaptic neuron, not per synapse.** The annotation
+table's consensus `top_nt` (acetylcholine 86,193, glutamate 24,875, GABA
+19,171, dopamine 5,909, serotonin 2,282, octopamine 216) is applied via
+Dale's principle — one neuron, one fast transmitter. That is less noisy than
+the per-synapse predictions and much cheaper: the edge list's six probability
+columns over 16.8M rows are never read. **40.2%** of pairs come out
+inhibitory (6,071,458); 394 pairs have a presynaptic neuron with no
+annotation and are left excitatory.
+
+`W[i, j]` is presynaptic *j* onto postsynaptic *i* — rows postsynaptic — to
+match the `W @ v` in PLAN.md §5. Getting that backwards would silently run
+the brain in reverse, so the orientation is now stated in the module
+docstring and the decisions log.
+
+**Speed, and a measurement mistake worth recording.** PLAN.md's tick is 10
+LIF sub-ticks per 20 ms. The first version of this check reported **32 ms per
+sparse matmul**, which would have made the design 16× too slow for real time.
+That number was almost entirely cuSPARSE first-call handle setup and
+algorithm selection, plus a host sync every iteration. Warmed up and timed
+over 200 reps:
+
+| dtype | per matmul | 10 sub-ticks | vs 20 ms tick | effective bandwidth |
+|---|---|---|---|---|
+| float16 | 0.943 ms | 9.4 ms | **2.12× real-time** | 97.1 GB/s |
+| float32 | 0.989 ms | 9.9 ms | **2.02× real-time** | 123.5 GB/s |
+
+So the loop fits, with roughly 2× headroom, before SUMO's share of the tick.
+The check now warms up before timing.
+
+**fp32 is the new default.** It costs 29 MiB and 5% more time — both trivial
+against 8 GB — and removes a real hazard: with weights up to 2405 and
+in-degree in the hundreds, fp16 products saturate to `inf` within a couple of
+sub-ticks unless every step is rescaled. `config.yaml` documents the
+trade-off; fp16 remains one line away.
+
 ### Every sensory/motor cluster resolves to a valid row index — PASS
 
 All 14, against `Supplemental_file1_neuron_annotations.tsv` (139,248 annotated
@@ -274,20 +336,51 @@ launch, so `provision.sh` verifies an actual matmul rather than trusting
 are now corrected in PLAN.md rather than papered over — see the cluster
 section.
 
-**A self-inflicted bug worth recording:** `ET.iterparse` with a blanket
-`elem.clear()` wipes child `<param>` attributes before the parent `<edge>`
-end-event fires, silently destroying every `origId`. `SumoNet._parse` clears
-only `edge` and `location` elements for exactly this reason.
+**RAM is tighter than VRAM.** This was expected to be a GPU-memory exercise;
+it was not. The GPU never went above 118 MiB of 7.93 GiB. Host RAM is the
+real ceiling: WSL2 defaults to half of physical memory, so 7.7 GiB of the
+15.3 GiB host, and **`duarouter` alone peaks at 3.85 GB RSS** loading the
+862 MB network. Running the full check suite and a benchmark concurrently got
+both OOM-killed. Everything here runs comfortably one at a time; Phase 2,
+which needs SUMO resident *alongside* the SNN, should raise the WSL allocation
+via `.wslconfig` rather than discover this the hard way. Peak RSS for the
+connectome aggregation itself is a comfortable 2.65 GiB.
+
+**Two self-inflicted bugs worth recording.**
+
+`ET.iterparse` with a blanket `elem.clear()` wipes child `<param>` attributes
+before the parent `<edge>` end-event fires, silently destroying every
+`origId`. `SumoNet._parse` clears only `edge` and `location` elements for
+exactly this reason.
+
+The first version of the GPU check timed sparse matmuls without warming up,
+and so reported 32 ms each — which would have meant PLAN.md's 10-sub-tick
+20 ms loop was 16× too slow for real time, a conclusion that would have
+misdirected all of Phase 2. The true steady-state figure is 0.94 ms. Anything
+measuring cuSPARSE has to discard the first few calls.
 
 ## Notes for Phase 2
 
-- SUMO at `--step-length 0.1` is decided but unproven on a 385k-edge network
-  with traffic demand. Measure before committing to it.
+- **Raise the WSL memory allocation** before running SUMO alongside the SNN.
+  7.7 GiB is enough for one stage at a time and not much more; `duarouter`
+  alone wants 3.85 GB.
+- The SNN loop has ~2× real-time headroom (9.4 ms of a 20 ms tick). SUMO at
+  `--step-length 0.1` has to fit in what is left, and that is still unproven
+  on a 385k-edge network with traffic demand. Measure it early — the sync
+  design depends on it, and the tick budget has no slack for a surprise.
+- Edge weights are raw aggregate synapse counts up to 2405, and in-degree runs
+  to hundreds. LIF calibration has to scale them: `v_thresh = 1.0` against a
+  weight of 2,405 will not behave. This is also why the default dtype is now
+  fp32 — see the connectome section.
 - Monoamine (octopamine, serotonin, dopamine) edges are excitatory-signed in
   `W` as a placeholder. Harmless only while PAM/PPL1 are unwired; the
   reinforcement loop must make dopamine act on weights instead.
-- Edge weights are raw aggregate synapse counts, ranging into the thousands.
-  LIF calibration has to scale them — `v_thresh = 1.0` against a weight of
-  3,000 will not behave.
+- Consider whether the weak tail belongs in the matrix at all. 80% of the
+  15.1M pairs are below FlyWire's own ≥5-synapse reliability threshold. The
+  knob is `compute.min_syn_count`; the decision is a fidelity-versus-noise
+  call that Phase 2's dynamics should settle empirically.
 - `cache/osm_sumo_edge_map.json` is 64 MB of JSON and takes ~80 s to rebuild.
   If Phase 2 reloads it often, convert it to `.npz`.
+- For "which SUMO edge is the vehicle on", use `SumoNet.nearest_edge` (KD-tree
+  point query, no ID map needed). Use the ID map for the set-wise direction:
+  which SUMO edges to aggregate congestion over for a given OSMnx edge.
