@@ -600,9 +600,14 @@ def main() -> None:
     for rows in sensory_motor_ids(clusters)[0].values():
         if rows:
             v[rows] = 1.0
-    out = torch.sparse.mm(w, v)
+    # Weights are raw synapse counts, so scale the drive down to keep an fp16
+    # product inside range. Phase 2's LIF calibration has the same problem.
+    out = torch.sparse.mm(w, v / max(float(w.abs().values().max()), 1.0))
     if w.device.type == "cuda":
         torch.cuda.synchronize()
+    assert bool(torch.isfinite(out).all()), (
+        f"sparse matmul overflowed in {cfg.compute.dtype}"
+    )
     driven = int((out.squeeze(1) != 0).sum())
     print(f"[gpu] one sparse matmul from the sensory clusters drives "
           f"{driven:,} downstream neurons", flush=True)

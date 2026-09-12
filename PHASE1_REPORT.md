@@ -87,6 +87,69 @@ query Phase 2's traffic demand will make.
 This was flagged as the hardest, least-proven piece, and it was. Its own
 section below.
 
+### Every sensory/motor cluster resolves to a valid row index — PASS
+
+All 14, against `Supplemental_file1_neuron_annotations.tsv` (139,248 annotated
+neurons). Every row index is checked to round-trip: `neurons[row]` must equal
+the root ID the cluster claims for it.
+
+| Cluster | Pattern | Rows | Example root ID |
+|---|---|---|---|
+| `odor_dm1` | `^DM1[_ ]` | 2 | 720575940619071005 |
+| `odor_dm4` | `^DM4[_ ]` | 4 | 720575940615366055 |
+| `compass_epg` | `^EPGt?$` | 51 | 720575940602917088 |
+| `optic_flow_t4` | `^T4[a-d]$` | 6,241 | 720575940599457990 |
+| `optic_flow_t5` | `^T5[a-d]$` | 6,005 | 720575940596125868 |
+| `looming_lc4` | `^LC4$` | 104 | 720575940603637438 |
+| `looming_lplc2` | `^LPLC2$` | 210 | 720575940603989420 |
+| `acoustic_jo` | `^auditory$` | 387 | 720575940600433181 |
+| `steer_l_dna01` | `^DNa01$` | 4 | 720575940618167579 |
+| `steer_r_dna02` | `^DNa02$` | 2 | 720575940604737708 |
+| `panic_dnp01` | `^DNp01$` | 2 | 720575940622838154 |
+| `throttle` | `^DNg02` (**fallback**) | 25 | 720575940610863310 |
+| `reward_pam` | `^PAM` | 307 | 720575940604479590 |
+| `punish_ppl1` | `^PPL1` | 16 | 720575940609180611 |
+
+The counts are the check that these are the right cells, not just *some*
+cells: EPG at 51 against a literature figure of ~46–50, DNp01 at exactly 2
+for a bilateral Giant Fiber pair, PPL1 at 16, T4/T5 in the low thousands per
+subtype-set. DM1 resolves to `DM1_lPN` and DM4 to `DM4_vPN` + `DM4_adPN`, all
+`cell_class = ALPN`, `cell_sub_class = uniglomerular` — the uniglomerular
+olfactory projection neurons for those two glomeruli, one per hemisphere.
+
+Resolution is by regex against `cell_type`, `hemibrain_type`, `cell_class`,
+`super_class` and `cell_sub_class`, with primary and fallback patterns tried
+in order and **which one matched recorded in the output**, so a fallback can
+never quietly pass itself off as the intended mapping. A cluster that matches
+nothing raises rather than returning an empty list. Three of the 390 annotated
+auditory neurons have no connections in the edge list and so have no matrix
+row; that count is reported per cluster as `missing_from_matrix`.
+
+#### The two clusters PLAN.md named that do not exist in FAFB
+
+Both are corrected in PLAN.md (§3 and §4) rather than quietly substituted.
+
+**`B1`/`B2` — throttle.** The b1 and b2 basalar wing motor neurons live in the
+ventral nerve cord. FAFB/FlyWire is a brain-only volume, so they are not in
+this dataset and no pattern will ever find them. Wiring the real wing motor
+neurons would mean pulling in MANC, a separate connectome, which is out of
+scope. The brain-side equivalent is **DNg02**, the descending population that
+sets wingbeat amplitude — 25 neurons, `super_class = descending`, matched as a
+prefix because v783 splits it into subtypes `DNg02_a` … `DNg02_h`. This is the
+one cluster resolving via its fallback, and it is flagged as such in
+`cache/cluster_ids_783.json`.
+
+**`aPN` — acoustic.** No `aPN` label exists in v783 under any type column.
+What the release does curate is `cell_sub_class = auditory`: 390 neurons,
+every one a `JO-A*`/`JO-B*` cell type with `super_class = sensory`. Those are
+the sound-sensitive Johnston's organ subgroups, as distinct from the
+`JO-C`/`D`/`E` wind-and-gravity (484) and grooming (191) subgroups of the same
+organ — so the curation is doing exactly the discrimination this project needs
+for a 500–800 Hz horn. They are afferents rather than projection neurons,
+which arguably makes them the better injection site: it is where sound
+actually enters the brain. The cluster is named `acoustic_jo` rather than
+`acoustic_apn` so nobody reading Phase 2 code mistakes them for PNs.
+
 ### Also checked
 
 - **`python main.py` serves the mock stack** — PASS. The check starts the real

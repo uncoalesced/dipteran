@@ -306,16 +306,34 @@ def check_connectome() -> dict:
         "assumption in the Phase 1 brief was wrong"
     )
 
+    # Ten sparse matmuls, the same shape of work one 20ms SNN tick does.
+    # Weights are raw aggregate synapse counts (up to 2405) and in-degree runs
+    # to hundreds, so an unnormalised fp16 product saturates to inf within a
+    # couple of steps and every subsequent check would be measuring nothing.
+    # Rescaling to unit max each step keeps the kernel exercised on real
+    # values -- and is a standing note for Phase 2, whose LIF calibration has
+    # to scale these weights for the same reason.
     started = time.monotonic()
     v = torch.zeros(stats["neurons"], 1, dtype=w.dtype, device=w.device)
     v[::1000] = 1.0
+    finite = True
     for _ in range(10):
         v = torch.sparse.mm(w, v)
-        v = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0).clamp(-10, 10)
+        finite = finite and bool(torch.isfinite(v).all())
+        scale = v.abs().max()
+        if scale > 0:
+            v = v / scale
     torch.cuda.synchronize()
     elapsed = time.monotonic() - started
+    assert finite, (
+        "sparse matmul produced inf/nan even with per-step rescaling; the "
+        f"{cfg.compute.dtype} matrix cannot be driven at this weight scale"
+    )
+    assert int((v != 0).sum()) > 0, "ten matmuls drove no neuron at all"
 
     return {
+        "matmul_stayed_finite": finite,
+        "driven_neurons_after_10_steps": int((v != 0).sum()),
         **stats,
         "matrix_mib": round(stats["matrix_bytes_allocated"] / 2**20, 2),
         "predicted_mib": round(stats["matrix_bytes_predicted"] / 2**20, 2),
