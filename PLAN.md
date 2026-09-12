@@ -264,7 +264,7 @@ Resolved 2026-09-12 via a design-review interview. Recorded so later contributor
 
 Phases are dependency-ordered; each should be a mergeable milestone.
 
-**Phase 1 — Basic Build & Backend Foundations** — complete. Measured results in [`PHASE1_REPORT.md`](PHASE1_REPORT.md); `python check_phase1.py` re-asserts every item below.
+**Phase 1 — Basic Build & Backend Foundations** — complete. Measured results in [`PHASE1_REPORT.md`](PHASE1_REPORT.md), summary in [`CHANGELOG.md`](CHANGELOG.md); `python check_phase1.py` re-asserts every item below.
 
 - [x] Get the repo skeleton running: the mock `main.py` + `index.html` scaffold, end to end, as the baseline before real work starts.
 - [x] Document hardware requirement (CUDA GPU, VRAM sized for a ~139k-node sparse adjacency matrix run alongside SUMO).

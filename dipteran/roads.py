@@ -319,7 +319,7 @@ class SumoNet:
     vectorised array, because the join touches every edge.
     """
 
-    def __init__(self, net_xml: Path):
+    def __init__(self, net_xml: Path, with_connections: bool = False):
         self.path = net_xml
         self.offset_x = 0.0
         self.offset_y = 0.0
@@ -329,14 +329,20 @@ class SumoNet:
         self.origids: list[set[str]] = []
         lengths: list[float] = []
         shapes: list[list[tuple[float, float]]] = []
+        # Buffering ~1.6M edge-id strings before `index` exists costs a few
+        # hundred MB, and only the routability check needs them -- the ID-map
+        # check already holds the OSMnx graph and has nothing to spare.
         conn_from: list[str] = []
         conn_to: list[str] = []
+        self.with_connections = with_connections
         self.skipped_no_shape = 0
         self._parse(lengths, shapes, conn_from, conn_to)
 
         self.index = {edge_id: i for i, edge_id in enumerate(self.edge_ids)}
-        self._build_connections(conn_from, conn_to)
+        if with_connections:
+            self._build_connections(conn_from, conn_to)
         del conn_from, conn_to
+        gc.collect()
         self.lengths = np.asarray(lengths, dtype=np.float64)
         counts = np.asarray([len(s) for s in shapes], dtype=np.int64)
         self._offsets = np.concatenate([[0], np.cumsum(counts)])
@@ -368,11 +374,12 @@ class SumoNet:
                conn_from: list[str], conn_to: list[str]) -> None:
         for _, elem in ET.iterparse(self.path, events=("end",)):
             if elem.tag == "connection":
-                source, target = elem.get("from", ""), elem.get("to", "")
-                if source and target and not source.startswith(":") \
-                        and not target.startswith(":"):
-                    conn_from.append(source)
-                    conn_to.append(target)
+                if self.with_connections:
+                    source, target = elem.get("from", ""), elem.get("to", "")
+                    if source and target and not source.startswith(":") \
+                            and not target.startswith(":"):
+                        conn_from.append(source)
+                        conn_to.append(target)
                 elem.clear()
             elif elem.tag == "location":
                 off_x, off_y = elem.get("netOffset", "0,0").split(",")
@@ -448,6 +455,11 @@ class SumoNet:
         destination in the same routable component" -- duarouter gives the
         authoritative route, but needs 4.4 GB to do it.
         """
+        if not self.with_connections:
+            raise RuntimeError(
+                "this SumoNet was built without connections; construct it "
+                "with SumoNet(path, with_connections=True)"
+            )
         start, goal = self.index[from_edge], self.index[to_edge]
         seen = np.zeros(len(self.edge_ids), dtype=bool)
         seen[start] = True
@@ -954,7 +966,7 @@ def verify_routable(cfg: Config, endpoints: dict | None = None,
 def main() -> None:
     cfg = load_config()
     graph = build_osmnx_graph(cfg)
-    net = SumoNet(build_sumo_net(cfg))
+    net = SumoNet(build_sumo_net(cfg), with_connections=True)
     id_map = build_id_map(cfg, graph=graph, net=net, force=True)
     verify_id_map(cfg, id_map, graph, net)
     orig, dest = route_endpoints(cfg, graph)

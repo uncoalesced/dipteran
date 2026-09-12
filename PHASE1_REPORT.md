@@ -150,20 +150,35 @@ match the `W @ v` in PLAN.md §5. Getting that backwards would silently run
 the brain in reverse, so the orientation is now stated in the module
 docstring and the decisions log.
 
-**Speed, and a measurement mistake worth recording.** PLAN.md's tick is 10
-LIF sub-ticks per 20 ms. The first version of this check reported **32 ms per
-sparse matmul**, which would have made the design 16× too slow for real time.
-That number was almost entirely cuSPARSE first-call handle setup and
-algorithm selection, plus a host sync every iteration. Warmed up and timed
-over 200 reps:
+**Speed, and two measurement mistakes worth recording.** PLAN.md's tick is 10
+LIF sub-ticks per 20 ms. Warmed up and timed over 200 reps of bare
+`torch.sparse.mm` (`cache/bench.py`):
 
 | dtype | per matmul | 10 sub-ticks | vs 20 ms tick | effective bandwidth |
 |---|---|---|---|---|
 | float16 | 0.943 ms | 9.4 ms | **2.12× real-time** | 97.1 GB/s |
 | float32 | 0.989 ms | 9.9 ms | **2.02× real-time** | 123.5 GB/s |
 
-So the loop fits, with roughly 2× headroom, before SUMO's share of the tick.
-The check now warms up before timing.
+So the matmul work fits with roughly 2× headroom, before SUMO's share of the
+tick. Both mistakes on the way there were mine, and both would have
+misdirected Phase 2:
+
+*First*, the check originally timed without warming up and reported **32 ms
+per matmul** — almost entirely cuSPARSE first-call handle setup and algorithm
+selection. Taken at face value that says PLAN.md's loop is 16× too slow for
+real time.
+
+*Second*, once warmed, the check's own 10-iteration loop still reported 8.7 ms
+per sub-tick. Part of that was real — `scale = driven.abs().max()` followed by
+`if scale > 0` reads a GPU scalar into Python, forcing a host sync every
+sub-tick, which is a genuine trap for Phase 2's tick loop and is now avoided.
+But removing the branch made the *reported* figure worse, not better (13.4 ms),
+which is the tell: ten iterations sampled once is not a benchmark. The check
+no longer derives a real-time factor from it — it just shows the matrix can be
+driven repeatedly without blowing up, and points at `bench.py` for the number.
+
+The lesson for Phase 2: benchmark the tick properly, warmed and repeated, and
+keep GPU scalars out of Python inside the loop.
 
 **fp32 is the new default.** It costs 29 MiB and 5% more time — both trivial
 against 8 GB — and removes a real hazard: with weights up to 2405 and
@@ -389,14 +404,41 @@ Three fixes, escalating, because the first two were not enough:
    JSON) and merges the results. `--in-process` keeps the old behaviour for
    anyone with the RAM.
 
-The lesson worth carrying: in a memory-capped guest, a checker that holds
-multi-gigabyte artefacts across steps is not slow, it is unreliable, and the
-failures do not point at the cause. Peak RSS per step, for reference: 3–4 GB
-OSMnx graph, ~2 GB parsing the `.net.xml`, 2.65 GiB connectome aggregation,
-4.42 GB duarouter.
+Peak RSS per step, for reference: 3–4 GB OSMnx graph, ~2 GB parsing the
+`.net.xml`, 2.65 GiB connectome aggregation, 4.42 GB duarouter.
 
-Phase 2 needs SUMO resident *alongside* the SNN, so raise the WSL allocation
-in `.wslconfig` before starting.
+Raising the guest to `memory=11GB` / `swap=4GB` in
+`%USERPROFILE%\.wslconfig` fixed it: all seven checks then passed in one
+invocation, `id_map` taking 321.5 s of the ~7 minute run.
+
+Worth recording that I got the diagnosis wrong one more time before that.
+While the 11 GB run was in progress its log appeared frozen for minutes at
+the same line the crashes had happened on, so I concluded the memory cap was
+only half the story and blamed sustained 9p I/O — `/mnt/e` is a 9p mount of
+the Windows drive, and the ID-map check reads 862 MB + 154 MB across it and
+rewrites a 64 MB JSON three times. It was in fact just 9p write buffering
+delaying the log; the run completed cleanly with exit 0.
+
+That detour did leave something worth keeping. `dipteran/config.py` now
+honours **`DIPTERAN_DATA_ROOT`**, which relative paths in `config.yaml`
+resolve against instead of the repo:
+
+```bash
+DIPTERAN_DATA_ROOT=/opt/dipteran python check_phase1.py
+```
+
+Putting the gigabyte artefacts on ext4 rather than 9p is measurably faster and
+keeps the repo portable, so it is the recommended way to run this on WSL —
+just not, as it turns out, a correctness fix.
+
+The lesson that does hold: in a memory-capped guest, a checker that holds
+multi-gigabyte artefacts across steps is not slow, it is unreliable — and the
+failures point nowhere near the cause. A silent exit 1 with no traceback and
+the shell gone looks identical whatever the underlying reason, which is why
+this took several wrong turns.
+
+Phase 2 needs SUMO resident *alongside* the SNN, so keep the raised
+`.wslconfig` allocation.
 
 **WSL itself needed restarting once.** After the OOM kills, the distro came
 back but the WSL service started answering

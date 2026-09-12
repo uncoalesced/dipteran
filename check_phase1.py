@@ -46,10 +46,10 @@ def _graph():
     return build_osmnx_graph(load_config())
 
 
-def _net():
+def _net(with_connections: bool = False):
     from dipteran.roads import SumoNet, build_sumo_net
     cfg = load_config()
-    return SumoNet(build_sumo_net(cfg))
+    return SumoNet(build_sumo_net(cfg), with_connections=with_connections)
 
 # Each check is (name, the exit criterion it answers, its function).
 CRITERIA: list[tuple[str, str, str]] = [
@@ -225,7 +225,7 @@ def check_sumo_net() -> dict:
     net_xml = build_sumo_net(cfg)
     assert net_xml.exists() and net_xml.stat().st_size > 0, net_xml
 
-    net = _net()
+    net = _net(with_connections=True)
     assert net.edge_ids, ".net.xml contains no non-internal edges"
     assert net.proj_params, ".net.xml has no projParameter"
     assert not net.skipped_no_shape, (
@@ -363,13 +363,16 @@ def check_connectome() -> dict:
         torch.sparse.mm(w, v)
     torch.cuda.synchronize()
 
+    # The rescale stays entirely on the device. An earlier version wrote
+    # `scale = driven.abs().max(); if scale > 0:` -- and that Python branch
+    # reads a GPU scalar, forcing a host sync every sub-tick, which cost 8.7ms
+    # per step against a 0.94ms matmul. Phase 2's tick loop must not read GPU
+    # scalars into Python either.
     started = time.monotonic()
     driven = v
     for _ in range(10):
         driven = torch.sparse.mm(w, driven)
-        scale = driven.abs().max()
-        if scale > 0:
-            driven = driven / scale
+        driven = driven / driven.abs().amax().clamp(min=1e-6)
     torch.cuda.synchronize()
     elapsed = time.monotonic() - started
     finite = bool(torch.isfinite(driven).all())
@@ -381,20 +384,22 @@ def check_connectome() -> dict:
     assert int((driven != 0).sum()) > 0, "ten matmuls drove no neuron at all"
     # PLAN.md's tick budget is 20ms for 10 sub-ticks. Exceeding it does not
     # make Phase 1 wrong, but it decides whether Phase 2 can run in real time.
-    # This includes the per-step rescale (a device-wide reduction plus a
-    # divide), so it is the cost of a whole sub-tick, not of the matmul alone.
-    # cache/bench.py times bare torch.sparse.mm for that.
+    # Informational only, and deliberately NOT turned into a real-time
+    # factor. Ten iterations sampled once, including a rescale, is not a
+    # benchmark: successive runs of this exact loop gave 86.7 ms and 134.4 ms,
+    # while cache/bench.py -- warmed up, 200 reps, bare torch.sparse.mm --
+    # measures 0.94 ms (fp16) and 0.99 ms (fp32) per matmul consistently.
+    # Trust bench.py for the tick budget; this number only shows the matrix
+    # can be driven repeatedly without blowing up.
     tick_ms = elapsed * 1000
-    print(f"[gpu] 10 sub-ticks in {tick_ms:.1f} ms "
-          f"({tick_ms / 10:.3f} ms each, rescale included) against a 20 ms "
-          f"tick budget -> {20 / tick_ms:.2f}x real-time", flush=True)
+    print(f"[gpu] 10 sub-ticks in {tick_ms:.1f} ms including the rescale "
+          f"(one sample -- see cache/bench.py for a real benchmark)",
+          flush=True)
 
     return {
         "matmul_stayed_finite": finite,
         "driven_neurons_after_10_steps": int((driven != 0).sum()),
-        "ms_per_subtick_incl_rescale": round(tick_ms / 10, 3),
-        "tick_ms_for_10_subticks": round(tick_ms, 2),
-        "realtime_factor_at_20ms_tick": round(20 / tick_ms, 2),
+        "ten_subticks_ms_single_sample": round(tick_ms, 2),
         **stats,
         "matrix_mib": round(stats["matrix_bytes_allocated"] / 2**20, 2),
         "predicted_mib": round(stats["matrix_bytes_predicted"] / 2**20, 2),

@@ -10,6 +10,7 @@ Run `python -m dipteran.config` for a self-check.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -18,6 +19,14 @@ from pydantic import BaseModel, Field, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "config.yaml"
+
+# Relative paths in config.yaml resolve against the repo by default. Set
+# DIPTERAN_DATA_ROOT to put the multi-gigabyte artefacts somewhere else --
+# specifically, off a WSL 9p mount. Reading the 862 MB .net.xml and rewriting
+# a 64 MB JSON across /mnt/<drive> is both slow and, on this machine,
+# destabilising: sustained 9p I/O took the WSL VM down repeatedly, at the same
+# point each run, with plenty of free RAM.
+DATA_ROOT = Path(os.environ.get("DIPTERAN_DATA_ROOT") or REPO_ROOT)
 
 EARTH_RADIUS_M = 6_371_008.8
 
@@ -124,7 +133,7 @@ class Paths(BaseModel):
         for field in type(self).model_fields:
             value: Path = getattr(self, field)
             if not value.is_absolute():
-                object.__setattr__(self, field, (REPO_ROOT / value).resolve())
+                object.__setattr__(self, field, (DATA_ROOT / value).resolve())
         return self
 
 
@@ -160,7 +169,7 @@ def demo() -> None:
     print(f"device         : {cfg.compute.device} / {cfg.compute.dtype}")
     print(f"cache_dir      : {cfg.paths.cache_dir}")
 
-    assert cfg.paths.sumo_net.is_absolute(), "paths must resolve against repo root"
+    assert cfg.paths.sumo_net.is_absolute(), "paths must resolve to absolute"
     assert r.bbox.contains(r.origin) and r.bbox.contains(r.destination)
 
     # An extract radius that cannot reach the destination must be rejected.
