@@ -346,6 +346,17 @@ which needs SUMO resident *alongside* the SNN, should raise the WSL allocation
 via `.wslconfig` rather than discover this the hard way. Peak RSS for the
 connectome aggregation itself is a comfortable 2.65 GiB.
 
+**WSL itself needed restarting once.** After the OOM kills, the distro came
+back but the WSL service started answering
+`Wsl/Service/E_UNEXPECTED — Catastrophic failure` to every command, with
+`dxgk: dxgkio_reserve_gpu_va: Ioctl failed: -75` in the kernel log — the GPU
+virtual-address passthrough had come unstuck. `wsl --terminate Ubuntu` fixed
+it; the full `wsl --shutdown` was avoided because Docker Desktop shares the
+subsystem. Worth knowing that repeated OOM kills in a CUDA-using WSL distro
+can leave the GPU passthrough in a state that only a distro restart clears,
+and that a silent exit 1 with no traceback is what that looks like from the
+outside.
+
 **Two self-inflicted bugs worth recording.**
 
 `ET.iterparse` with a blanket `elem.clear()` wipes child `<param>` attributes
