@@ -1,0 +1,29 @@
+# Python & Environment
+__pycache__/
+*.py[cod]
+.venv/
+env/
+.env
+
+# Large Biological Datasets & Compiled Models (never commit these)
+data/
+cache/
+*.csv
+*.parquet
+*.feather
+*.pt
+*.pth
+*.npy
+*.npz
+
+# SUMO & OSM outputs
+*.net.xml
+*.rou.xml
+*.poly.xml
+*.osm
+*.sumocfg
+
+# Credentials & Tokens
+*token*
+*credential*
+*.secret
