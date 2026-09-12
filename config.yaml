@@ -1,0 +1,67 @@
+# Dipteran route + runtime configuration.
+# No lat/lon constants live in code -- everything routeable is a field here.
+# Loaded and validated by dipteran/config.py (Pydantic).
+
+route:
+  name: silk_board_to_tin_factory
+
+  origin:
+    label: Central Silk Board Junction
+    lat: 12.9177
+    lon: 77.6238
+
+  destination:
+    label: Tin Factory
+    lat: 13.0039
+    lon: 77.6653
+
+  # Radius of the OSM extract around origin, in metres.
+  dist_m: 15000
+
+  # OSMnx network_type: what counts as a traversable way.
+  network_type: drive
+
+  # Bangalore envelope. The frontend's MapLibre maxBounds uses the same
+  # numbers; origin and destination are validated to fall inside it.
+  bbox:
+    west: 77.40
+    south: 12.80
+    east: 77.80
+    north: 13.15
+
+compute:
+  # torch device for the connectome sparse matrix.
+  device: cuda:0
+  # fp16 values keep the adjacency matrix in the tens-of-MB range.
+  dtype: float16
+
+paths:
+  data_dir: data
+  cache_dir: cache
+
+  # FlyWire v783 static archive: fetched by dipteran/connectome.py, never
+  # committed. See DATA_LICENSE.md. Filenames match the upstream downloads.
+  #   proofread_connections_783.feather -- Zenodo record 10676866 (852 MB),
+  #     already aggregated per (neuron pair, neuropil); avoids the 9.5 GB
+  #     per-synapse table entirely.
+  #   Supplemental_file1_neuron_annotations.tsv -- flyconnectome/flywire_annotations
+  connectome_edges: data/flywire/proofread_connections_783.feather
+  cell_annotations: data/flywire/Supplemental_file1_neuron_annotations.tsv
+
+  # Derived: neuron row order for the adjacency matrix.
+  neuron_index: cache/neuron_index_783.npy
+  cluster_ids: cache/cluster_ids_783.json
+
+  # Derived road-network artefacts (all gitignored).
+  osm_extract: cache/bangalore.osm.xml
+  sumo_net: cache/bangalore.net.xml
+  graphml: cache/bangalore_drive.graphml
+  id_map: cache/osm_sumo_edge_map.json
+
+sumo:
+  # Phase 2 sync decision: SUMO 10 Hz, SNN 50 Hz, batched control every 5th
+  # SNN tick. Recorded here so Phase 2 does not re-litigate it. Unused in
+  # Phase 1 beyond netconvert.
+  step_length: 0.1
+  # null -> resolve netconvert via SUMO_HOME or PATH.
+  binary_dir: null

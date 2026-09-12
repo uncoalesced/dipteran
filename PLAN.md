@@ -229,6 +229,32 @@ Resolved 2026-09-12 via a design-review interview. Recorded so later contributor
 | PLAN.md role | Living roadmap, not a one-time explainer | Project is now committed to build-out, not just concept documentation |
 | Roadmap granularity | Consolidated into 4 phases (basic build + backend foundations / finish backend / frontend + testing / ship) | User wanted a small, trackable phase count rather than 8 micro-phases |
 
+### Resolved in later planning rounds (2026-09-12)
+
+| Topic | Decision | Why |
+|---|---|---|
+| GPU/VRAM sizing | Non-issue. The adjacency matrix holds one entry per *connected neuron pair* (aggregate synapse weight), not one per raw synapse. Do not build a per-synapse matrix. | ~2–3M non-zeros, not 54.5M. At fp16 values with int32 indices that is tens of MB against an 8GB budget |
+| FlyWire data access | Static v783 archive (Feather edge list) via Zenodo/Codex download — **not** the live CAVE query API for bulk connectivity | A `caveclient` account is still useful for interactive annotation lookup, but it does not gate the download |
+| FlyWire data license | Treat as **CC BY-NC 4.0** (attribution + non-commercial) | Sources conflict — Zenodo metadata says CC-BY-4.0, flywire.ai/guidelines says CC BY-NC 4.0. NC is the binding conservative assumption. Never commit the raw connectome or any matrix compiled from it. See `DATA_LICENSE.md` |
+| Code license | MIT for Dipteran's own code | Independent of the CC BY-NC 4.0 data license above |
+| Route config | `config.yaml`, Pydantic-validated — origin/destination/bbox/network_type/device/data paths as fields | No hardcoded lat/lon constants in code |
+| SUMO/SNN sync | SUMO at `--step-length 0.1` (10Hz), SNN at 50Hz (20ms), sample SUMO state and issue batched `traci` control every 5th SNN tick (100ms boundary); frontend interpolates for 60fps | Phase 2 implements this; Phase 1 only had to avoid foreclosing it |
+
+### Resolved while building Phase 1 (2026-09-12)
+
+| Topic | Decision | Why |
+|---|---|---|
+| Platform | WSL2 Ubuntu 26.04, installed `--no-launch` and driven as root | SUMO/OSMnx/GDAL are far cleaner than Windows-native, and CUDA passthrough works untouched. `--no-launch` skips first-boot UNIX account creation, which nothing here needs |
+| Python version | 3.12, from a `uv`-managed standalone CPython | Ubuntu 26.04 ships Python 3.14, which has no torch or geopandas wheels; source builds are not worth it |
+| venv location | `/opt/dipteran/.venv` on ext4, not inside the repo on `/mnt/e` | torch pulls ~3GB across thousands of small files and the 9p mount makes that crawl. `.venv/` stays in `.gitignore` for anyone who does put it in-repo |
+| torch build | `--index-url https://download.pytorch.org/whl/cu128` | The RTX 5050 is Blackwell, compute capability sm_120. Pre-cu128 wheels import fine and then fail at the first kernel launch |
+| OSM extract | One Overpass query into one local `.osm.xml`, feeding **both** `ox.graph_from_xml` and `netconvert` | Two independent downloads are not guaranteed to share way IDs, and the entire ID-mapping layer rests on them doing so. OSMnx's own `drive` filter is used in the Overpass query so both graphs see an identical way set |
+| Connectome file | `proofread_connections_783.feather` (852MB, Zenodo record 10676866) — *not* `flywire_synapses_783.feather` (9.5GB) | The proofread file is already aggregated per (neuron pair, neuropil); summing over neuropils yields exactly the per-pair weight wanted, without downloading and grouping 130M individual synapses |
+| FlyWire account | Not a prerequisite for running Dipteran | Both the connectome and the annotation table are openly downloadable. The use terms still apply — see `DATA_LICENSE.md` |
+| Annotation source | `Supplemental_file1_neuron_annotations.tsv` from `flyconnectome/flywire_annotations` | Carries `root_id` against `cell_type`/`hemibrain_type`/`super_class`/`cell_class`, which is what cluster resolution needs |
+| Adjacency orientation | `W[i, j]` is presynaptic *j* onto postsynaptic *i* — rows postsynaptic, columns presynaptic | Matches the `W @ v` in §5's LIF step. Getting this backwards silently runs the brain in reverse |
+| Glutamate sign | Inhibitory | The dominant postsynaptic glutamate receptor in the fly CNS is the glutamate-gated chloride channel GluCl-α. ACh excitatory, GABA inhibitory as usual; monoamines are left excitatory-signed as a placeholder, since Phase 2 has PAM/PPL1 dopamine acting on weights rather than as direct current |
+
 ## 10. Roadmap
 
 Phases are dependency-ordered; each should be a mergeable milestone.
@@ -270,8 +296,15 @@ Phases are dependency-ordered; each should be a mergeable milestone.
 
 ## 11. Known Risks / Blockers
 
-- **FlyWire data license**: confirm the exact terms of the CAVE data use agreement before assuming any derived artifact (even a pre-processed adjacency matrix) can be cached or shared between contributors.
-- **SUMO tick resolution vs. 20ms SNN loop**: SUMO's default step length is 1 second; running it at 20ms sub-steps is unproven for performance and may need a coarser SNN tick instead, or a decoupled update rate between SUMO and the SNN.
-- **OSMnx↔SUMO ID mapping**: no existing tooling was identified for this join; likely custom code, and the trickiest single piece of engineering in the stack.
-- **GPU/VRAM sizing**: the full ~139k × ~139k sparse adjacency matrix's memory footprint under `torch.sparse` needs a real sizing pass before assuming any given GPU is sufficient.
-- **No zero-setup path anymore**: the project now requires a CUDA GPU, a SUMO install, and a FlyWire account — this is a real barrier to the "anyone can clone and run" framing in the original README and should be reflected there.
+Resolved during Phase 1 — kept here with their outcomes rather than deleted, since the reasoning is the useful part:
+
+- ~~**FlyWire data license**~~ — **resolved**: treated as CC BY-NC 4.0, the stricter of two conflicting upstream statements. No connectome data and no artifact derived from it (adjacency matrix, neuron index, resolved cluster table) is committed or shared; every contributor fetches it themselves. Recorded in `DATA_LICENSE.md` with the required citations.
+- ~~**OSMnx↔SUMO ID mapping**~~ — **resolved**, and it did need custom code. The join is two-stage: `netconvert --output.original-names true` writes the source OSM way ID onto every lane as an `origId` param, which indexes candidates; geometry then picks the segments that actually overlap. Way ID alone is far too coarse — one long way becomes hundreds of OSMnx edges *and* hundreds of SUMO edges, and a pure ID join maps every one of the former to every one of the latter. See `PHASE1_REPORT.md` for the measured numbers.
+- ~~**GPU/VRAM sizing**~~ — **resolved**: a per-connected-pair matrix, not a per-synapse one. Measured footprint is in `PHASE1_REPORT.md`; it is nowhere near the 8GB budget.
+- ~~**No zero-setup path anymore**~~ — **partly softened**: a CUDA GPU and a SUMO install are still required, but a FlyWire account turned out *not* to be. Both the v783 connectome and the annotation table are openly downloadable, so `python -m dipteran.connectome` fetches them unattended. README still needs updating to match (Phase 4).
+
+Still open:
+
+- **SUMO tick resolution vs. the 20ms SNN loop**: SUMO's default step length is 1 second. The design decision is now made — SUMO at `--step-length 0.1`, SNN at 50Hz, batched `traci` control every 5th SNN tick — but it is unproven for performance on a network this size (385k edges) and has not been run with traffic demand yet. Phase 2.
+- **OSMnx graph connectivity**: the extract has 239 strongly-connected components. The configured origin and destination are in the same one and `duarouter` routes between them, but a vehicle that wanders into a smaller component can get stranded. Phase 2's hybrid motion model needs to handle that rather than assume it away.
+- **Monoamine signs are placeholders**: octopamine, serotonin and dopamine edges are currently excitatory-signed in `W`. That is wrong as biology and only harmless while PAM/PPL1 are unwired; Phase 2's reinforcement loop has to make dopamine act on weights instead.
