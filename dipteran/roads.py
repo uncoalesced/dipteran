@@ -24,6 +24,7 @@ Run `python -m dipteran.roads` to execute all four steps and verify the join.
 from __future__ import annotations
 
 import datetime as dt
+import gc
 import json
 import math
 import os
@@ -770,15 +771,13 @@ def verify_determinism(cfg: Config, graph, net: SumoNet,
     return {"deterministic": True, "entries": len(first["osmnx_edge_to_sumo"])}
 
 
-def verify_routable(cfg: Config, net: SumoNet | None = None) -> dict:
-    """Ask SUMO itself whether A->B is drivable on the generated network.
+def route_endpoint_edges(cfg: Config, net: SumoNet) -> dict:
+    """The SUMO edges nearest the configured origin and destination.
 
-    "No fatal topology errors" is not the same as routable: netconvert exits 0
-    on networks whose components are disconnected. duarouter answering with an
-    actual edge list between the origin and destination edges is the decisive
-    check, and it is the same query Phase 2's traffic demand will make.
+    Returns plain data, not the network, so the caller can drop its several
+    hundred MB before `verify_routable` spawns duarouter -- which peaks at
+    4.4 GB on this network and will not co-exist with it in a 7.7 GiB VM.
     """
-    net = net or SumoNet(build_sumo_net(cfg))
     r = cfg.route
     from_edge, from_gap = net.nearest_edge(r.origin.lon, r.origin.lat)
     to_edge, to_gap = net.nearest_edge(r.destination.lon, r.destination.lat)
@@ -786,6 +785,34 @@ def verify_routable(cfg: Config, net: SumoNet | None = None) -> dict:
           flush=True)
     print(f"[route] destination -> SUMO edge {to_edge} ({to_gap:.1f} m away)",
           flush=True)
+    return {
+        "from_edge": from_edge,
+        "to_edge": to_edge,
+        "origin_gap_m": round(from_gap, 1),
+        "destination_gap_m": round(to_gap, 1),
+        "lengths": {e: float(net.lengths[i])
+                    for i, e in enumerate(net.edge_ids)},
+    }
+
+
+def verify_routable(cfg: Config, endpoints: dict | None = None,
+                    net: SumoNet | None = None) -> dict:
+    """Ask SUMO itself whether A->B is drivable on the generated network.
+
+    "No fatal topology errors" is not the same as routable: netconvert exits 0
+    on networks whose components are disconnected. duarouter answering with an
+    actual edge list between the origin and destination edges is the decisive
+    check, and it is the same query Phase 2's traffic demand will make.
+
+    Pass `endpoints` from `route_endpoint_edges` and drop the SumoNet first;
+    passing `net` here is the convenient path, not the memory-safe one.
+    """
+    if endpoints is None:
+        net = net or SumoNet(build_sumo_net(cfg))
+        endpoints = route_endpoint_edges(cfg, net)
+    from_edge = endpoints["from_edge"]
+    to_edge = endpoints["to_edge"]
+    lengths = endpoints["lengths"]
 
     trips = cfg.paths.cache_dir / "phase1_check.trips.xml"
     routes = cfg.paths.cache_dir / "phase1_check.rou.xml"
@@ -819,16 +846,14 @@ def verify_routable(cfg: Config, net: SumoNet | None = None) -> dict:
             "origin and destination are in disconnected components"
         )
     edges = route_elem.get("edges", "").split()
-    length = sum(
-        float(net.lengths[net.index[e]]) for e in edges if e in net.index
-    )
+    length = sum(lengths.get(e, 0.0) for e in edges)
     print(f"[route] duarouter route: {len(edges)} edges, {length / 1000:.2f} km",
           flush=True)
     return {
         "from_edge": from_edge,
         "to_edge": to_edge,
-        "origin_gap_m": round(from_gap, 1),
-        "destination_gap_m": round(to_gap, 1),
+        "origin_gap_m": endpoints["origin_gap_m"],
+        "destination_gap_m": endpoints["destination_gap_m"],
         "route_edges": len(edges),
         "route_km": round(length / 1000, 2),
         "straight_line_km": round(cfg.route.separation_m / 1000, 2),
@@ -844,7 +869,10 @@ def main() -> None:
     orig, dest = route_endpoints(cfg, graph)
     print(f"[route] OSMnx origin node {orig} -> destination node {dest}",
           flush=True)
-    verify_routable(cfg, net)
+    endpoints = route_endpoint_edges(cfg, net)
+    del graph, net
+    gc.collect()
+    verify_routable(cfg, endpoints=endpoints)
     print("\nroads self-check OK")
 
 

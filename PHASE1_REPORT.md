@@ -336,15 +336,31 @@ launch, so `provision.sh` verifies an actual matmul rather than trusting
 are now corrected in PLAN.md rather than papered over — see the cluster
 section.
 
-**RAM is tighter than VRAM.** This was expected to be a GPU-memory exercise;
-it was not. The GPU never went above 118 MiB of 7.93 GiB. Host RAM is the
-real ceiling: WSL2 defaults to half of physical memory, so 7.7 GiB of the
-15.3 GiB host, and **`duarouter` alone peaks at 3.85 GB RSS** loading the
-862 MB network. Running the full check suite and a benchmark concurrently got
-both OOM-killed. Everything here runs comfortably one at a time; Phase 2,
-which needs SUMO resident *alongside* the SNN, should raise the WSL allocation
-via `.wslconfig` rather than discover this the hard way. Peak RSS for the
-connectome aggregation itself is a comfortable 2.65 GiB.
+**RAM is tighter than VRAM, and this cost the most time of anything here.**
+The whole exercise was expected to be GPU-memory-bound. It was not — the GPU
+never went above 118 MiB of 7.93 GiB. Host RAM is the real ceiling. WSL2
+defaults to half of physical memory, so 7.7 GiB of the 15.3 GiB host, and
+`/usr/bin/time -v` puts **`duarouter` at 4.42 GB peak RSS** (39 s, exit 0)
+just to load the 862 MB network and route one trip.
+
+That does not co-exist with a parsed `SumoNet` in the same process, and the
+failure mode is nasty: the OOM killer takes the Python parent, the whole WSL
+session dies, and nothing is printed — a silent exit 1 with no traceback, at
+the same line every time. It took three runs and a standalone
+`/usr/bin/time -v` to pin down, having first been misread as two concurrent
+jobs (which was *also* happening, and which is what the earlier kills were).
+
+The fix is structural rather than a bigger VM: `route_endpoint_edges` now
+returns plain data — the two edge IDs and an edge→length map — so
+`check_sumo_net` can drop the network and `gc.collect()` before
+`verify_routable` spawns the subprocess. For the same reason the
+cross-check memoisation of the OSMnx graph and SUMO network was reverted:
+holding a 3–4 GB graph across checks to save a 25 s re-read is a bad trade at
+this memory budget.
+
+Phase 2 needs SUMO resident *alongside* the SNN, so raise the WSL allocation
+in `.wslconfig` before starting. For reference, peak RSS elsewhere: 2.65 GiB
+for the connectome aggregation, 3–4 GB for the OSMnx graph.
 
 **WSL itself needed restarting once.** After the OOM kills, the distro came
 back but the WSL service started answering

@@ -217,7 +217,8 @@ def check_osmnx() -> dict:
 
 
 def check_sumo_net() -> dict:
-    from dipteran.roads import build_sumo_net, verify_routable
+    from dipteran.roads import (build_sumo_net, route_endpoint_edges,
+                                verify_routable)
 
     cfg = load_config()
     net_xml = build_sumo_net(cfg)
@@ -229,16 +230,23 @@ def check_sumo_net() -> dict:
     assert not net.skipped_no_shape, (
         f"{net.skipped_no_shape} edges have no lane geometry"
     )
-
-    routing = verify_routable(cfg, net)
-    assert routing["route_edges"] > 1, routing
-    return {
+    facts = {
         "net_xml_mb": round(net_xml.stat().st_size / 1e6, 1),
         "edges": len(net.edge_ids),
         "shape_points": int(len(net.lonlat)),
         "proj": net.proj_params,
-        **routing,
     }
+    endpoints = route_endpoint_edges(cfg, net)
+
+    # duarouter peaks at 4.4 GB loading this network. The parsed SumoNet is
+    # several hundred MB more and WSL2 gives us 7.7 GiB, so let it go before
+    # spawning the subprocess -- holding both gets the process OOM-killed.
+    del net
+    gc.collect()
+
+    routing = verify_routable(cfg, endpoints=endpoints)
+    assert routing["route_edges"] > 1, routing
+    return {**facts, **routing}
 
 
 def check_id_map() -> dict:
@@ -325,7 +333,6 @@ def check_connectome() -> dict:
 
     started = time.monotonic()
     driven = v
-    finite = True
     for _ in range(10):
         driven = torch.sparse.mm(w, driven)
         scale = driven.abs().max()
@@ -342,15 +349,18 @@ def check_connectome() -> dict:
     assert int((driven != 0).sum()) > 0, "ten matmuls drove no neuron at all"
     # PLAN.md's tick budget is 20ms for 10 sub-ticks. Exceeding it does not
     # make Phase 1 wrong, but it decides whether Phase 2 can run in real time.
+    # This includes the per-step rescale (a device-wide reduction plus a
+    # divide), so it is the cost of a whole sub-tick, not of the matmul alone.
+    # cache/bench.py times bare torch.sparse.mm for that.
     tick_ms = elapsed * 1000
     print(f"[gpu] 10 sub-ticks in {tick_ms:.1f} ms "
-          f"({tick_ms / 10:.3f} ms per matmul) against a 20 ms tick budget "
-          f"-> {20 / tick_ms:.2f}x real-time", flush=True)
+          f"({tick_ms / 10:.3f} ms each, rescale included) against a 20 ms "
+          f"tick budget -> {20 / tick_ms:.2f}x real-time", flush=True)
 
     return {
         "matmul_stayed_finite": finite,
         "driven_neurons_after_10_steps": int((driven != 0).sum()),
-        "ms_per_sparse_mm": round(tick_ms / 10, 3),
+        "ms_per_subtick_incl_rescale": round(tick_ms / 10, 3),
         "tick_ms_for_10_subticks": round(tick_ms, 2),
         "realtime_factor_at_20ms_tick": round(20 / tick_ms, 2),
         **stats,
