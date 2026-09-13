@@ -149,6 +149,22 @@ CLUSTERS: dict[str, Cluster] = {
         "sensory", (r"^LPLC2$",),
         note="LPLC2 looming detector; drives DNp01.",
     ),
+    "mechano_bristle": Cluster(
+        "sensory", (r"^(campaniform|chordotonal)",),
+        fallbacks=((r"^(head|eye) bristle$",
+                    "campaniform sensilla and chordotonal organs sit in the "
+                    "legs and wings, so their afferents are ventral nerve "
+                    "cord neurons and cannot be in a brain-only volume -- the "
+                    "same reason PLAN.md's b1/b2 throttle had to become "
+                    "DNg02. The brain-side mechanosensory afferents v783 does "
+                    "curate are the bristle populations, which is where a "
+                    "mechanical shock actually enters this dataset."),),
+        note=(
+            "Pothole impact. PLAN.md section 3 routes potholes to 'chordotonal "
+            "organ & campaniform sensilla'; see the fallback for why those "
+            "resolve to bristle mechanosensory afferents here instead."
+        ),
+    ),
     "acoustic_jo": Cluster(
         "sensory", (r"^auditory$",),
         fallbacks=((r"^JO-[AB]",

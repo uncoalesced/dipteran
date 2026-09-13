@@ -142,11 +142,76 @@ class Sumo(BaseModel):
     binary_dir: Optional[Path] = None
 
 
+class Vehicle(BaseModel):
+    """Fly-vehicle envelope and the motor transfer.
+
+    `throttle_scale` and `steer_scale` are the boundary between two different
+    quantities: `MotorOutput.throttle` is a DNg02 *population firing rate*,
+    measured in roughly [0.05, 0.24], while the motion model wants a command
+    in [0, 1]. Treating the rate as if it were the command pins the vehicle
+    at 5% throttle -- an accurate brain wired to a mis-scaled servo.
+    """
+
+    throttle_scale: float = Field(default=4.0, gt=0.0)
+    steer_scale: float = Field(default=2.5, gt=0.0)
+    max_speed_ms: float = Field(default=16.0, gt=0.0)
+    max_accel_ms2: float = Field(default=2.5, gt=0.0)
+    brake_ms2: float = Field(default=8.0, gt=0.0)
+    max_turn_deg_s: float = Field(default=45.0, gt=0.0)
+    # Fraction of the off-road offset closed per second by the soft pull.
+    edge_pull_per_s: float = Field(default=2.0, ge=0.0)
+    pothole_density: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
+class Snn(BaseModel):
+    """LIF and reinforcement parameters.
+
+    `gain` is measured rather than chosen -- see `navigator.calibrate_gain`.
+    """
+
+    gain: float = Field(default=16.0, gt=0.0)
+    # Scales external sensory current. Separate from `gain`, which scales the
+    # recurrent drive: the world supplies small, uneven currents (an inverse
+    # odour law is 0.047 at the start of a 10.6 km route) and they need their
+    # own scale to reach threshold.
+    sensory_gain: float = Field(default=1.0, gt=0.0)
+    decay: float = Field(default=0.9, ge=0.0, lt=1.0)
+    v_thresh: float = Field(default=1.0, gt=0.0)
+    v_reset: float = -0.2
+    subticks: int = Field(default=10, ge=1)
+    # Relative, not absolute: the update is scaled by each synapse's own
+    # anatomical weight (see navigator._reinforce). With the trace saturating
+    # at 1/(1 - trace_decay) = 5, this caps drift at 0.05% of baseline per
+    # tick, so meaningful adaptation needs ~1000 ticks (20 s) of sustained
+    # dopamine. An absolute 0.01 here moved weights 500x their own magnitude
+    # per tick and flatlined the motors inside 70 s.
+    learning_rate: float = Field(default=1e-4, ge=0.0)
+    trace_decay: float = Field(default=0.8, ge=0.0, lt=1.0)
+    # Slow pull back toward the anatomy, applied every tick regardless of
+    # dopamine, so a punished episode is survivable. Without it a long stall
+    # depresses the very motor pathway needed to escape it.
+    homeostasis: float = Field(default=0.001, ge=0.0, lt=1.0)
+    # Learned weights stay within +/- this fraction of |anatomical weight|.
+    plastic_span: float = Field(default=0.5, gt=0.0)
+
+    @model_validator(mode="after")
+    def _reset_below_threshold(self) -> "Snn":
+        if self.v_reset >= self.v_thresh:
+            raise ValueError(
+                f"v_reset ({self.v_reset}) must sit below v_thresh "
+                f"({self.v_thresh}); a neuron that resets at or above its own "
+                "threshold fires every sub-tick forever"
+            )
+        return self
+
+
 class Config(BaseModel):
     route: Route
     compute: Compute
     paths: Paths
     sumo: Sumo
+    snn: Snn = Snn()
+    vehicle: Vehicle = Vehicle()
 
 
 def load_config(path: Path | str | None = None) -> Config:

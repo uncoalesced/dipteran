@@ -72,8 +72,67 @@ paths:
 
 sumo:
   # Phase 2 sync decision: SUMO 10 Hz, SNN 50 Hz, batched control every 5th
-  # SNN tick. Recorded here so Phase 2 does not re-litigate it. Unused in
-  # Phase 1 beyond netconvert.
+  # SNN tick. Measured against live traci in Phase 2 and it holds with room
+  # to spare -- 61 ms of a 100 ms frame, 1.64x real time, and SUMO is only
+  # 3.5 ms of that. See scripts/bench_sync.py.
   step_length: 0.1
   # null -> resolve netconvert via SUMO_HOME or PATH.
   binary_dir: null
+
+snn:
+  # Excitability. This is the one number PHASE1_REPORT.md warned could not be
+  # guessed: edge weights are raw aggregate synapse counts up to 2405, so
+  # PLAN.md's sketch value of v_thresh=1.0 against them is meaningless. Rows
+  # are normalised by their own total input weight instead, leaving `gain` as
+  # the single excitability knob, and it was swept rather than picked --
+  # `python -m dipteran.navigator` reproduces the table. 16.0 is the lowest
+  # gain that both keeps the network off its rails (33.5 Hz) and gets the
+  # descending motor neurons firing fast enough to steer (17.7 Hz); at 8.0
+  # the motors manage 1.1 Hz and the vehicle simply never turns.
+  gain: 16.0
+  decay: 0.9
+  v_thresh: 1.0
+  v_reset: -0.2
+  # LIF sub-ticks per 20 ms SNN tick, so one sub-tick is 2 ms.
+  subticks: 10
+  # Three-factor reinforcement: eligibility trace x (PAM - PPL1), scaled by
+  # each synapse's own anatomical weight. The relative form is not cosmetic:
+  # `plastic` holds row-normalised weights (~1e-4) while the trace saturates
+  # at 1/(1 - trace_decay) = 5, so an absolute learning_rate of 0.01 applied
+  # 0.05 per tick -- 500x the synapse it was modifying. A 55-minute route run
+  # caught it: relative drift went 9.6e-03 -> 6.0e-01 in 40 seconds, pinned
+  # against the clamp, and the vehicle flatlined at 0.00 m/s permanently.
+  # At 1e-4 the cap is 0.05% of baseline per tick, so real adaptation needs
+  # ~1000 ticks (20 s) of sustained dopamine.
+  learning_rate: 0.0001
+  trace_decay: 0.8
+  # Slow return toward the anatomy, applied every tick whether dopamine
+  # arrives or not. Recovery from a punished episode cannot depend on being
+  # rewarded later: a long stall punishes the very motor pathway needed to
+  # escape it, and without this the stall is permanent.
+  homeostasis: 0.001
+  # Learned weights stay inside +/- this fraction of |anatomical weight|, so
+  # reinforcement can bias the connectome but never invent a pathway that is
+  # not in it, and never flip an inhibitory synapse excitatory.
+  plastic_span: 0.5
+
+vehicle:
+  # The boundary between two different quantities. MotorOutput.throttle is a
+  # DNg02 *population firing rate* -- measured at 0.05-0.24, because
+  # descending neurons sit in balanced excitation and inhibition and fire
+  # sparsely, which is what a real brain does. The motion model wants a
+  # command in [0, 1]. Treating the rate as the command pins the vehicle at
+  # 5% throttle: an accurate brain wired to a mis-scaled servo. Raising
+  # snn.sensory_gain does not help -- throttle holds at 0.04-0.05 from 1x to
+  # 32x, and past 8x the giant fiber starts firing on 45-70% of ticks.
+  throttle_scale: 4.0
+  steer_scale: 2.5
+  max_speed_ms: 16.0
+  max_accel_ms2: 2.5
+  brake_ms2: 8.0
+  max_turn_deg_s: 45.0
+  # Fraction of the off-road offset the soft pull closes per second. This is
+  # what keeps the hybrid motion model attached to the road network without
+  # snapping the fly onto a lane, so it can still take wrong turns.
+  edge_pull_per_s: 2.0
+  pothole_density: 0.05
