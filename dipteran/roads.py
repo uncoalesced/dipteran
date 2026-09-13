@@ -361,6 +361,7 @@ class SumoNet:
         self._kx = _deg_lon_m(self.lat0)
         self.local = self.to_local(self.lonlat)
         self.local_centroids = self.to_local(self.centroids)
+        self._max_seg_m = self._longest_segment()
         self._tree = self._build_tree()
         print(f"[sumo] parsed {len(self.edge_ids)} edges, "
               f"{len(self._xy)} shape points"
@@ -511,6 +512,19 @@ class SumoNet:
             (lonlat[:, 1] - self.lat0) * DEG_LAT_M,
         ])
 
+    def _longest_segment(self) -> float:
+        """Longest single shape segment, in metres.
+
+        This is the exact extra search radius `nearest_edge` needs -- see the
+        bound argued there. Consecutive points from *different* edges are not
+        a segment, so those gaps are masked out.
+        """
+        if len(self.local) < 2:
+            return 0.0
+        steps = np.hypot(*(self.local[1:] - self.local[:-1]).T)
+        same_edge = self._point_edge[1:] == self._point_edge[:-1]
+        return float(steps[same_edge].max()) if same_edge.any() else 0.0
+
     def _build_tree(self):
         if not len(self.local):
             return None
@@ -538,18 +552,41 @@ class SumoNet:
 
         Pure geometry -- no OSM IDs involved. This is what makes it usable as
         an independent check on the ID-based join.
+
+        The KD-tree indexes shape *points*, so its nearest neighbour is a
+        vertex, not an edge. Taking the owner of that vertex is wrong whenever
+        the query sits mid-segment: a point 2 m off the middle of a 100 m edge
+        is 50 m from either of its endpoints, so the nearest *vertex* belongs
+        to a neighbouring edge and the answer comes back 50 m out. Phase 2
+        uses this to decide which edge the vehicle is on, so it scores every
+        candidate edge with the real point-to-polyline distance and returns
+        the true minimum.
+
+        The radius is a bound, not a guess. The best achievable gap is at most
+        `d0`, the distance to the nearest vertex (that vertex lies on its own
+        edge). The winning edge's closest point sits on a segment no longer
+        than `_max_seg_m`, so one of that segment's endpoints is within
+        `sqrt(d0**2 + (_max_seg_m / 2)**2) <= d0 + _max_seg_m / 2`.
         """
         query = self.to_local(np.asarray([[lon, lat]]))[0]
         if self._tree is not None:
-            _, point_idx = self._tree.query(query)
-            edge_idx = int(self._point_edge[point_idx])
+            d0, _ = self._tree.query(query)
+            radius = float(d0) + self._max_seg_m / 2.0
+            near = self._tree.query_ball_point(query, radius)
+            edge_idx = np.unique(self._point_edge[near])
         else:
             deltas = self.local - query
-            point_idx = int(np.argmin(np.einsum("ij,ij->i", deltas, deltas)))
-            edge_idx = int(self._point_edge[point_idx])
-        edge_id = self.edge_ids[edge_idx]
-        gap = point_to_polyline_m(query, self.edge_local(edge_id))
-        return edge_id, gap
+            d2 = np.einsum("ij,ij->i", deltas, deltas)
+            radius = math.sqrt(float(d2.min())) + self._max_seg_m / 2.0
+            edge_idx = np.unique(self._point_edge[d2 <= radius * radius])
+
+        best_id, best_gap = "", float("inf")
+        for i in edge_idx:
+            edge_id = self.edge_ids[int(i)]
+            gap = point_to_polyline_m(query, self.edge_local(edge_id))
+            if gap < best_gap:
+                best_id, best_gap = edge_id, gap
+        return best_id, best_gap
 
 
 # --------------------------------------------------------------------------
