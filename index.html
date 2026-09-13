@@ -2,26 +2,60 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Drosophila Bangalore Purgatory</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <style>
     body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
     #map { width: 100%; height: 100%; }
+    #brain { width: 100%; height: 220px; display: block; }
+    .meter { height: 3px; border-radius: 2px; background: #26292e; overflow: hidden; }
+    .meter > i { display: block; height: 100%; width: 0; transition: width 120ms linear; }
   </style>
 </head>
 <body class="bg-gray-900 text-white font-sans">
   <div id="map"></div>
 
-  <!-- Bottom Right Telemetry & Event HUD -->
+  <!-- Neural activity HUD. Layout follows the reference screenshots: point
+       cloud, state banner, per-region legend with meters. Nothing else about
+       those references carries over -- they were a third-party visualiser
+       reacting to social-media behaviour, and the captions here are the
+       Bangalore traffic states from PLAN.md instead. -->
+  <div class="absolute top-6 left-6 w-[360px] bg-black/85 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl overflow-hidden">
+    <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800">
+      <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome</span>
+      <span id="badge" class="text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono">MOCK STREAM</span>
+    </div>
+
+    <canvas id="brain"></canvas>
+    <div id="brain-missing" class="hidden px-4 pb-3 pt-3 text-[11px] font-mono text-neutral-500 leading-relaxed">
+      No point cloud. Run <span class="text-neutral-300">python scripts/extract_neuropils.py</span>
+      to build it from the FlyWire annotation table.
+    </div>
+
+    <div class="px-4 pb-3 border-b border-neutral-800">
+      <div id="state-title" class="text-lg font-semibold tracking-tight">AWAITING STREAM</div>
+      <div id="state-caption" class="text-xs text-neutral-400 mt-0.5">Connecting to the simulation.</div>
+    </div>
+
+    <div class="px-4 py-3 flex items-center justify-between text-xs font-mono border-b border-neutral-800">
+      <span class="text-neutral-400">Dopamine</span>
+      <span id="dopamine-value" class="text-neutral-100 tabular-nums">0%</span>
+    </div>
+
+    <div id="legend" class="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-2"></div>
+  </div>
+
+  <!-- Telemetry & event log -->
   <div class="absolute bottom-6 right-6 w-96 bg-black/85 backdrop-blur-md border border-neutral-800 rounded-xl p-4 shadow-2xl flex flex-col gap-3 pointer-events-auto">
     <div class="flex items-center justify-between border-b border-neutral-800 pb-2">
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome Vitals</span>
-      <span class="text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono">MOCK STREAM</span>
+      <span id="speed-value" class="text-xs font-mono text-neutral-400 tabular-nums">0.0 m/s</span>
     </div>
 
-    <!-- Gauges -->
     <div class="grid grid-cols-2 gap-2 text-xs font-mono">
       <div>
         <span class="text-neutral-400">PPL1 (Pain):</span>
@@ -37,7 +71,6 @@
       </div>
     </div>
 
-    <!-- Event Terminal -->
     <div class="mt-1">
       <span class="text-[10px] uppercase font-mono tracking-wider text-neutral-500">Neural Event Log</span>
       <div id="terminal" class="h-28 overflow-y-auto font-mono text-[11px] text-neutral-300 flex flex-col-reverse gap-1 mt-1 bg-black/50 p-2 rounded border border-neutral-900">
@@ -57,7 +90,6 @@
       maxBounds: BANGALORE_BOUNDS
     });
 
-    // Create Fly Marker Element
     const flyEl = document.createElement('div');
     flyEl.innerHTML = `
       <div style="transform-origin: center; transition: transform 0.05s linear;">
@@ -69,29 +101,225 @@
       </div>`;
     const flyMarker = new maplibregl.Marker({ element: flyEl }).setLngLat([77.6238, 12.9177]).addTo(map);
 
-    // WebSocket Stream Reader
+    // Background SUMO traffic as a GeoJSON layer, so hundreds of agents cost
+    // one source update per frame rather than hundreds of DOM markers.
+    map.on('load', () => {
+      map.addSource('traffic', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'traffic', type: 'circle', source: 'traffic',
+        paint: {
+          'circle-radius': 3,
+          'circle-color': '#8899a6',
+          'circle-opacity': 0.75,
+          'circle-stroke-width': 0.5,
+          'circle-stroke-color': '#0b0e11'
+        }
+      });
+    });
+
+    // ---------------------------------------------------------------
+    // Brain point cloud
+    // ---------------------------------------------------------------
+    const brain = {
+      ready: false, regions: [], clusterRegion: {},
+      base: null, colors: null, regionOf: null, geometry: null
+    };
+
+    function initBrain(payload) {
+      const canvas = document.getElementById('brain');
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(42, canvas.clientWidth / 220, 1, 4000);
+      camera.position.set(0, 0, 620);
+
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(canvas.clientWidth, 220, false);
+
+      const pts = payload.points;
+      const positions = new Float32Array(pts.length * 3);
+      const colors = new Float32Array(pts.length * 3);
+      const regionOf = new Uint8Array(pts.length);
+      const base = payload.regions.map(r => new THREE.Color(r.color));
+
+      for (let i = 0; i < pts.length; i++) {
+        // y is negated so the brain sits the way an anatomist draws it:
+        // FAFB's y axis grows downward through the volume.
+        positions[i * 3] = pts[i][0];
+        positions[i * 3 + 1] = -pts[i][1];
+        positions[i * 3 + 2] = pts[i][2];
+        regionOf[i] = pts[i][3];
+        const c = base[pts[i][3]];
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      const cloud = new THREE.Points(geometry, new THREE.PointsMaterial({
+        size: 3.2, vertexColors: true, transparent: true, opacity: 0.95,
+        sizeAttenuation: true, depthWrite: false,
+        blending: THREE.AdditiveBlending
+      }));
+      const group = new THREE.Group();
+      group.add(cloud);
+      scene.add(group);
+
+      Object.assign(brain, {
+        ready: true, regions: payload.regions,
+        clusterRegion: payload.cluster_region || {},
+        base, colors, regionOf, geometry
+      });
+
+      (function animate() {
+        requestAnimationFrame(animate);
+        group.rotation.y += 0.0025;
+        renderer.render(scene, camera);
+      })();
+
+      window.addEventListener('resize', () => {
+        camera.aspect = canvas.clientWidth / 220;
+        camera.updateProjectionMatrix();
+        renderer.setSize(canvas.clientWidth, 220, false);
+      });
+    }
+
+    function buildLegend(regions) {
+      const legend = document.getElementById('legend');
+      legend.innerHTML = '';
+      regions.forEach((r, i) => {
+        if (r.id === 'scaffold') return;      // context, not a readout
+        const row = document.createElement('div');
+        row.className = 'flex flex-col gap-1';
+        row.innerHTML = `
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full shrink-0" style="background:${r.color}"></span>
+            <span class="text-[10px] font-mono text-neutral-400 truncate">${r.label}</span>
+          </div>
+          <div class="meter"><i data-meter="${i}" style="background:${r.color}"></i></div>`;
+        legend.appendChild(row);
+      });
+    }
+
+    // Telemetry arrives keyed by cluster (compass_epg, looming_lc4, ...);
+    // the HUD groups those into anatomical regions. A region takes the max
+    // of its clusters, not the mean: DNa01 firing while DNa02 is silent is
+    // a hard left turn, and averaging would hide exactly that.
+    function regionActivation(regions) {
+      const out = {};
+      for (const [cluster, value] of Object.entries(regions || {})) {
+        const rid = brain.clusterRegion[cluster];
+        if (!rid) continue;
+        out[rid] = Math.max(out[rid] || 0, value);
+      }
+      return out;
+    }
+
+    function paint(activation) {
+      if (!brain.ready) return;
+      const { colors, regionOf, base, geometry, regions } = brain;
+      for (let i = 0; i < regionOf.length; i++) {
+        const r = regions[regionOf[i]];
+        const c = base[regionOf[i]];
+        // Scaffold stays dim and inert; only resolved regions glow.
+        const lit = r.id === 'scaffold'
+          ? 0.22
+          : 0.25 + 0.75 * Math.min(1, (activation[r.id] || 0) * 6);
+        colors[i * 3] = c.r * lit;
+        colors[i * 3 + 1] = c.g * lit;
+        colors[i * 3 + 2] = c.b * lit;
+      }
+      geometry.attributes.color.needsUpdate = true;
+
+      document.querySelectorAll('[data-meter]').forEach(el => {
+        const r = regions[Number(el.dataset.meter)];
+        el.style.width = `${Math.min(100, (activation[r.id] || 0) * 600)}%`;
+      });
+    }
+
+    fetch('/neuropils.json')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(payload => { initBrain(payload); buildLegend(payload.regions); })
+      .catch(() => {
+        document.getElementById('brain').classList.add('hidden');
+        document.getElementById('brain-missing').classList.remove('hidden');
+      });
+
+    // ---------------------------------------------------------------
+    // Stream
+    // ---------------------------------------------------------------
     const ws = new WebSocket(`ws://${location.host}/ws`);
     const term = document.getElementById('terminal');
     const barPain = document.getElementById('bar-pain');
     const barPanic = document.getElementById('bar-panic');
+    const badge = document.getElementById('badge');
+    const stateTitle = document.getElementById('state-title');
+    const stateCaption = document.getElementById('state-caption');
+    const dopamineValue = document.getElementById('dopamine-value');
+    const speedValue = document.getElementById('speed-value');
+
+    function log(text, tone) {
+      const item = document.createElement('div');
+      item.className = tone || 'text-amber-400/90';
+      item.textContent = `> ${text}`;
+      term.prepend(item);
+      while (term.childElementCount > 80) term.lastElementChild.remove();
+    }
 
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
 
+      if (data.error) {
+        stateTitle.textContent = 'SIMULATION FAILED';
+        stateCaption.textContent = data.error;
+        log(data.error, 'text-red-400');
+        return;
+      }
+
       flyMarker.setLngLat([data.lon, data.lat]);
       flyEl.firstElementChild.style.transform = `rotate(${data.heading}deg)`;
-      map.easeTo({ center: [data.lon, data.lat], duration: 50 });
+      map.easeTo({ center: [data.lon, data.lat], duration: 100 });
 
       barPain.style.width = `${data.pain_level * 100}%`;
       barPanic.style.width = `${data.giant_fiber * 100}%`;
 
-      if (data.event) {
-        const item = document.createElement('div');
-        item.className = "text-amber-400/90";
-        item.textContent = `> ${data.event}`;
-        term.prepend(item);
+      if (data.state) stateTitle.textContent = data.state;
+      if (data.caption) stateCaption.textContent = data.caption;
+      if (typeof data.dopamine === 'number') {
+        dopamineValue.textContent = `${Math.round(data.dopamine * 100)}%`;
+        dopamineValue.className = 'tabular-nums ' +
+          (data.dopamine > 0 ? 'text-emerald-400'
+            : data.dopamine < 0 ? 'text-red-400' : 'text-neutral-100');
       }
+      if (typeof data.speed_ms === 'number') {
+        speedValue.textContent = `${data.speed_ms.toFixed(1)} m/s`;
+      }
+
+      if (data.mock) {
+        badge.textContent = 'MOCK STREAM';
+        badge.className = 'text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono';
+      } else {
+        badge.textContent = 'LIVE';
+        badge.className = 'text-xs bg-emerald-950 text-emerald-400 px-2 py-0.5 rounded border border-emerald-800 font-mono';
+      }
+
+      paint(regionActivation(data.regions));
+
+      if (map.getSource('traffic')) {
+        map.getSource('traffic').setData({
+          type: 'FeatureCollection',
+          features: (data.nearby_agents || []).map(a => ({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [a.lon, a.lat] },
+            properties: { id: a.id }
+          }))
+        });
+      }
+
+      if (data.event) log(data.event);
     };
+
+    ws.onclose = () => log('stream closed', 'text-neutral-500');
   </script>
 </body>
 </html>
