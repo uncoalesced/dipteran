@@ -27,3 +27,6 @@ cache/
 *token*
 *credential*
 *.secret
+
+# Agent session context, skills and working ledgers (not project deliverables)
+.claude/

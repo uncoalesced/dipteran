@@ -260,6 +260,25 @@ Resolved 2026-09-12 via a design-review interview. Recorded so later contributor
 | Transmitter signs | Per *presynaptic neuron*, from the annotation table's consensus `top_nt` | Dale's principle: one neuron releases one fast transmitter. The per-neuron consensus is far less noisy than per-synapse predictions, and it avoids reading or reducing six probability columns over 16.8M rows. 40.2% of pairs come out inhibitory |
 | Glutamate sign | Inhibitory | The dominant postsynaptic glutamate receptor in the fly CNS is the glutamate-gated chloride channel GluCl-α. ACh excitatory, GABA inhibitory as usual; monoamines are left excitatory-signed as a placeholder, since Phase 2 has PAM/PPL1 dopamine acting on weights rather than as direct current |
 
+### Resolved while building Phase 2 (2026-09-14)
+
+Several of these were settled in a planning conversation whose notes live
+outside the repo. They are recorded here because a decision that exists only
+in an untracked scratch file does not exist to a fresh clone.
+
+| Topic | Decision | Why |
+|---|---|---|
+| HUD scope | **All** telemetry *and* frontend HUD work lands in Phase 2, not split across Phase 2/3 as §10 originally had it | The design produced a backend payload shape and a Three.js component together; specifying the schema without anything to render it would have meant guessing at what the HUD needed |
+| Arrival at Point B | **Not a pass/fail gate.** Phase 2's metric is net distance closed, trajectory entropy, and realistic circuit activation under disruption | The premise is purgatory, not autonomous navigation. Tuning the odour plume or compass until the agent ignores local topology and beelines to Tin Factory turns it into an artificial potential-field pathfinder wearing SNN clothing — the tension between an ancient olfactory/compass loop and Bangalore's dead ends *is* the project |
+| Region tagging | The two schemes **compose**: the 15 resolved clusters drive glow and state logic, a crude `super_class`/`cell_class` heuristic fills visual texture for the ~120k neurons in no named cluster | Precision where it drives behaviour, cheap scaffolding everywhere else. The resolved clusters are real root IDs verified in Phase 1; the heuristic is a string-prefix guess and should never be load-bearing |
+| `compute.min_syn_count` | Stays **0** through Phase 2; the ≥5 comparison is a Phase 3 sensitivity analysis | Raising it drops ~80% of the 15.1M pairs, which changes every row normalisation and so invalidates the calibrated `snn.gain` *and* the vehicle motor transfer together. Re-tuning the whole sensorimotor chain mid-phase creates a moving target |
+| LIF excitability | One knob, `snn.gain`, applied to **row-normalised** weights; swept and measured rather than chosen | §5's sketch value of `v_thresh = 1.0` is meaningless against aggregate synapse counts reaching 2,405. Normalising by each row's own total input weight turns synaptic drive into "what fraction of my input is firing" and leaves exactly one thing to calibrate |
+| Reinforcement scaling | The three-factor update is **multiplicative** — scaled by each synapse's own anatomical weight — with a homeostatic return toward anatomy every tick | An absolute update is ~500× the row-normalised weight it modifies, which pins the weights against their bounds in seconds and flatlines the motors. Multiplicative scaling also gets the biology right: you cannot strengthen a synapse that does not exist |
+| Firing rates vs. commands | A hard boundary. The brain emits population **firing rates**; the vehicle converts them to **commands** in [0,1] via `vehicle.throttle_scale` / `steer_scale`, stored on `VehicleState` | Measured DNg02 rates run 0.05–0.24 because descending neurons sit in balanced excitation/inhibition. Feeding a rate to a threshold written for a command silently disabled gridlock detection entirely, and feeding it to the motion model pinned the vehicle at 5% throttle |
+| Vehicle position lookup | Ask the **running SUMO process** over traci (`convertRoad`), not a resident `SumoNet` | Supersedes `PHASE1_REPORT.md`'s advice, on its own memory finding: `sumo` alone is 7,454 MB resident on this network against a 10,952 MB ceiling, so a second in-process copy does not fit. traci costs no extra resident memory |
+| HUD copy | No emojis; Bangalore traffic states only | Standing preference, and nothing from the third-party reference visualiser's framing carries over — those images were shared as **layout reference only** |
+| Phase 1 hardening debt | G1/G2 (unit tests) pulled into Phase 2; the stale-documentation gates stay in Phase 4 | Phase 2 stacks a navigator on top of the untested `.net.xml` parser and geometry join, so those get tests before more weight lands on them. Documentation staleness blocks nothing |
+
 ## 10. Roadmap
 
 Phases are dependency-ordered; each should be a mergeable milestone.
@@ -277,22 +296,27 @@ Phases are dependency-ordered; each should be a mergeable milestone.
 - [x] Resolve named clusters to real FlyWire root IDs from the v783 annotation table, producing the `sensory_ids`/`motor_ids` lookup tables.
 - ~~**Risk**: the OSMnx↔SUMO ID mapping is an unproven integration point~~ — it was indeed the hard part and did need custom code; see §11.
 
-**Phase 2 — Finish the Backend**
-- Implement `FlyBangaloreNavigator` against the real adjacency matrix on GPU.
-- Calibrate LIF parameters (`v_thresh`, `v_reset`, `decay`) against observed spike rates.
-- Wire PAM/PPL1 reinforcement into synaptic weight updates.
-- Run SUMO with background traffic agents on the synced network.
-- Implement the hybrid motion model (continuous heading/position + soft edge-pull).
-- Wire all sensory inputs each tick (odor, compass, optic flow, looming, mechanosensory, acoustic) from live OSMnx/SUMO state.
-- Replace the mock random-walk WebSocket streamer in `main.py` with real `FlyBangaloreNavigator` + SUMO output.
-- Finalize the JSON payload schema (extend the mock's fields with `nearby_agents` and any additional brain telemetry the HUD needs).
-- **Risk**: SUMO's default step length (1s) is far coarser than the SNN's 20ms tick — needs `--step-length` tuned down, with a performance check that SUMO can actually keep up at that resolution.
+**Phase 2 — Finish the Backend, plus the HUD** — complete. Measured results in [`PHASE2_REPORT.md`](PHASE2_REPORT.md), summary in [`CHANGELOG.md`](CHANGELOG.md).
+
+- [x] Implement `FlyBangaloreNavigator` against the real adjacency matrix on GPU — `dipteran/navigator.py`.
+- [x] Calibrate LIF parameters against observed spike rates. Swept, not chosen: `snn.gain = 16.0` is the lowest gain that both keeps the network off its rails (33.5 Hz) and gets the descending motor population firing fast enough to steer (17.7 Hz). Reproduce with `python -m dipteran.navigator`.
+- [x] Wire PAM/PPL1 reinforcement into synaptic weight updates — three-factor, eligibility trace × (PAM − PPL1), scaled by each synapse's own anatomical weight, bounded, with a homeostatic return. No backpropagation.
+- [x] Run SUMO with background traffic agents on the synced network — seeded through SUMO's own incremental router at insertion, deliberately not `duarouter` (Phase 1 measured that at a 3.85–4.4 GB peak, and Phase 2's budget has 2.4 GB spare).
+- [x] Implement the hybrid motion model — free heading/position via `moveToXY(keepRoute=2)`, soft-pulled toward the nearest road.
+- [x] Wire all sensory inputs each tick (odor, compass, optic flow, looming, mechanosensory, acoustic) from live SUMO state.
+- [x] Replace the mock random-walk WebSocket streamer in `main.py`. Mock mode is kept as the default, because `check_phase1.py`'s scaffold criterion starts `main.py` under a 45-second timeout and the live path needs ~28 s to build W plus 75–130 s for SUMO to parse the network.
+- [x] Finalize the JSON payload schema — extends the mock's seven fields rather than replacing them, adding `state`, `caption`, `steer`, `throttle`, `dopamine`, `speed_ms`, `edge`, `spike_rate`, `regions` and `nearby_agents`.
+- [x] **Pulled forward from Phase 3 by decision**: the Three.js neural-activity HUD, its per-neuropil point cloud ETL, and the background-traffic rendering layer.
+- ~~**Risk**: SUMO's default step length (1s) is far coarser than the SNN's 20ms tick~~ — **resolved, and the risk was on the other side.** At `--step-length 0.1` with 235 background vehicles, SUMO costs 3.5 ms of a 100 ms control frame; the SNN costs 56.7 ms. Whole frame 61.0 ms median, 67.6 ms p95 — 1.64× real time. See §11.
 
 **Phase 3 — Frontend & Testing**
-- Wire `index.html`'s existing MapLibre/HUD scaffold to the real payload schema.
-- Add the background SUMO traffic rendering layer.
-- Sanity checks: plausible spike rates, directionally-correct steering response to sensory input, Giant Fiber firing on a staged looming test.
-- End-to-end run: full pipeline (SUMO + SNN + FastAPI + frontend) driving the agent from Point A toward Point B without crashing the server.
+- ~~Wire `index.html`'s existing MapLibre/HUD scaffold to the real payload schema.~~ — done in Phase 2.
+- ~~Add the background SUMO traffic rendering layer.~~ — done in Phase 2.
+- Sanity checks: plausible spike rates, directionally-correct steering response to sensory input, Giant Fiber firing on a staged looming test. Spike rates are now measured (§9); the staged looming test and a controlled steering-response test are still owed.
+- ~~End-to-end run: full pipeline driving the agent from Point A toward Point B without crashing the server.~~ — run in Phase 2, see [`PHASE2_REPORT.md`](PHASE2_REPORT.md). Note the standing decision that **arrival is not a pass/fail gate**; the metric is net distance closed.
+- `compute.min_syn_count` sensitivity analysis: rebuild at FlyWire's ≥5-synapse reliability threshold and compare dynamics against the full-fidelity Phase 2 baseline. Requires re-calibrating `snn.gain` and the `vehicle` transfer scales together, since dropping ~80% of pairs changes every row normalisation.
+- Move plasticity from the descending motor rows to the biologically correct Kenyon cell → MBON site, if learned behaviour turns out to depend on where it lives.
+- Get in-loop rerouting off the critical path: `traci` `changeTarget` costs 7.8–9.5 ms median but spikes to 670–1,825 ms, which is 7 to 18 blown frames.
 
 **Phase 4 — Close Off & Ship on GitHub**
 - Update README to reflect the final architecture and drop any remaining mock-scaffold framing.
@@ -309,9 +333,17 @@ Resolved during Phase 1 — kept here with their outcomes rather than deleted, s
 - ~~**GPU/VRAM sizing**~~ — **resolved**: a per-connected-pair matrix, not a per-synapse one. Measured footprint is in `PHASE1_REPORT.md`; it is nowhere near the 8GB budget.
 - ~~**No zero-setup path anymore**~~ — **partly softened**: a CUDA GPU and a SUMO install are still required, but a FlyWire account turned out *not* to be. Both the v783 connectome and the annotation table are openly downloadable, so `python -m dipteran.connectome` fetches them unattended. README still needs updating to match (Phase 4).
 
+Resolved during Phase 2 — kept with their outcomes:
+
+- ~~**SUMO tick resolution vs. the 20ms SNN loop**~~ — **resolved, and the framing was backwards.** The worry was whether SUMO could fit in "the remaining ~10 ms" of a 20 ms tick. But SUMO steps once per *five* SNN ticks, so the real budget is a 100 ms frame, and against it: SNN 56.7 ms, SUMO 3.5 ms, traci sample and control 0.45 ms, whole frame **61.0 ms median / 67.6 ms p95 — 1.64× real time**, with 235 background vehicles on the 385k-edge network. SUMO was never the half at risk. Reproduce with `python scripts/bench_sync.py --stage combined`.
+- ~~**Host RAM, not VRAM, is the binding constraint**~~ — **still true, and now sized.** With `.wslconfig` at `memory=11GB` the guest has 10,952 MB. Resident `sumo` on this network is **7,454 MB**; the SNN side settles at 1,087 MB; **concurrent peak 8,506 MB, 2,446 MB spare**. The constraint that remains is one of *ordering*, not capacity: building the connectome peaks at 4,343 MB transiently, which does not fit alongside a resident SUMO. Build W and free the intermediates first, then launch SUMO. Reversing that order OOMs.
+- ~~**Monoamine signs are placeholders**~~ — **resolved.** The 8,316 monoamine rows (dopamine, serotonin, octopamine) are dropped from the fast current path entirely: neuromodulators do not drive their targets on a 20 ms timescale. Dopamine now acts on weights through the three-factor rule, as this section originally asked.
+
 Still open:
 
-- **Host RAM, not VRAM, is the binding constraint.** This was expected to be a GPU-memory problem and is not: the adjacency matrix takes 116 MiB of 7.93 GiB. But WSL2 defaults to half of physical memory (7.7 GiB of 15.3 GiB here), and `duarouter` alone peaks at 3.85 GB loading the 862 MB network while the OSMnx graph costs 3–4 GB resident. Phase 1 runs fine one stage at a time; Phase 2 needs SUMO resident *alongside* the SNN, so raise the allocation in `.wslconfig` first. Two concurrent Phase 1 runs were OOM-killed discovering this.
-- **SUMO tick resolution vs. the 20ms SNN loop**: SUMO's default step length is 1 second. The design decision is now made — SUMO at `--step-length 0.1`, SNN at 50Hz, batched `traci` control every 5th SNN tick — but it is unproven for performance on a network this size (385k edges) and has not been run with traffic demand yet. What *is* now measured is the SNN half: 10 sparse LIF sub-ticks cost 9.4 ms of the 20 ms tick, about 2× real-time headroom. SUMO has to fit in the remaining ~10 ms, and there is no slack for a surprise. Phase 2.
-- **OSMnx graph connectivity**: the extract has 239 strongly-connected components. The configured origin and destination are in the same one and `duarouter` routes between them, but a vehicle that wanders into a smaller component can get stranded. Phase 2's hybrid motion model needs to handle that rather than assume it away.
-- **Monoamine signs are placeholders**: octopamine, serotonin and dopamine edges are currently excitatory-signed in `W`. That is wrong as biology and only harmless while PAM/PPL1 are unwired; Phase 2's reinforcement loop has to make dopamine act on weights instead.
+- ~~**OSMnx graph connectivity**~~ — **resolved by construction, and measured.** `moveToXY(keepRoute=2)` makes the fly a free body, so it is never route-constrained into a dead component and only ever needs to be near *some* road. Over a 25,727-frame run `off_network_frames` was **0**, with the vehicle a median 1.15 m and a maximum 2.39 m from a road. The 239 components remain a fact about the extract; they are no longer a hazard to this vehicle.
+- **The closed-loop policy is an orbit.** This is the largest open item. Over 43 minutes of simulated time the fly travelled 6,776 m and closed **103.6 m**, visiting 8 edges by frame ~3,400 and none thereafter. `steer_abs_median` is 0.075 with a persistent sign, which at `vehicle.steer_scale` 2.5 and `max_turn_deg_s` 45 is a steady ~0.84° per frame in one direction — a constant turn rate, hence a circle — and the EPG compass drive (0.12–0.21 activation) is too weak to correct it. Arrival is not a pass/fail gate by standing decision, but *net distance closed* and *trajectory entropy* are the agreed metrics and both are poor. Everything underneath measures clean, so this is control tuning, and it belongs to Phase 3's "directionally-correct steering response" check.
+- **Reinforcement is wired but its behavioural effect is unmeasured.** The rule runs and is bounded — drift held in 1.74e-04–2.23e-04 across 25,727 frames without growing — but nothing yet demonstrates that the fly *learns* anything, that a punished junction becomes less likely on a second approach. That needs a controlled repeat-exposure test, and the orbit above means the fly currently meets too few distinct junctions for one to be meaningful.
+- **Plasticity sits at the wrong anatomical site.** The three-factor rule is applied to synapses onto the descending motor clusters. Biologically the modulated site is Kenyon cell → MBON inside the mushroom body. The current placement puts the rule on the readout the vehicle actually obeys, which is defensible, but it is a simplification and it is marked as one in the code.
+- **`compute.min_syn_count` is still unsettled empirically.** 80% of the 15.1M pairs sit below FlyWire's own ≥5-synapse reliability threshold. Deliberately deferred to Phase 3 as a sensitivity analysis rather than changed mid-phase, because dropping those pairs re-normalises every row and invalidates both the calibrated gain and the motor transfer at once.
+- **`traci` rerouting is a latency hazard.** `changeTarget` costs 7.8–9.5 ms median but was measured spiking to **670–1,825 ms** — 7 to 18 consecutive blown frames. Nothing in the current loop calls it per-frame, but any future in-loop rerouting has to run off the critical path.

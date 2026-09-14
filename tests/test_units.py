@@ -656,6 +656,30 @@ def test_reinforcement_is_scaled_by_the_anatomy():
     assert ticks > 500, f"band saturates in {ticks:.0f} ticks"
 
 
+def test_every_cluster_has_a_hud_region():
+    """A cluster absent from CLUSTER_REGION is silently dropped by the HUD.
+
+    Telemetry is keyed by cluster name and the page groups those into
+    anatomical regions via `cluster_region`. An unmapped cluster produces no
+    error anywhere -- the ETL prints a warning nobody reads, and the region
+    simply never lights up. Adding `mechano_bristle` in Phase 2 took the count
+    from 14 to 15, so this is a live failure mode, not a hypothetical.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(REPO / "scripts"))
+    from extract_neuropils import CLUSTER_REGION, REGIONS
+
+    from dipteran.connectome import CLUSTERS
+
+    assert set(CLUSTERS) == set(CLUSTER_REGION), (
+        f"unmapped: {sorted(set(CLUSTERS) - set(CLUSTER_REGION))}, "
+        f"stale: {sorted(set(CLUSTER_REGION) - set(CLUSTERS))}"
+    )
+    region_ids = {r[0] for r in REGIONS}
+    assert not set(CLUSTER_REGION.values()) - region_ids
+
+
 def test_plastic_bounds_survive_inhibitory_weights():
     """6.07M of the 15.1M pairs are inhibitory, so the band must be signed.
 

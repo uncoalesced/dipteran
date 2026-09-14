@@ -248,6 +248,9 @@
     // ---------------------------------------------------------------
     // Stream
     // ---------------------------------------------------------------
+    const FOLLOW_MS = 700;          // camera follow interval; see below
+    let lastFollow = 0;
+
     const ws = new WebSocket(`ws://${location.host}/ws`);
     const term = document.getElementById('terminal');
     const barPain = document.getElementById('bar-pain');
@@ -278,7 +281,18 @@
 
       flyMarker.setLngLat([data.lon, data.lat]);
       flyEl.firstElementChild.style.transform = `rotate(${data.heading}deg)`;
-      map.easeTo({ center: [data.lon, data.lat], duration: 100 });
+
+      // Follow the fly, but not on every frame. Easing at stream rate (20 Hz
+      // in mock, 10 Hz live) restarts the transition before the previous one
+      // finishes, so the camera never settles: map.loaded() stays false
+      // indefinitely and every frame re-triggers tile selection for a move of
+      // a few metres. Tiles do render regardless -- verified with 1,503
+      // features painted -- so this is wasted work, not a broken map.
+      const now = performance.now();
+      if (now - lastFollow > FOLLOW_MS) {
+        lastFollow = now;
+        map.easeTo({ center: [data.lon, data.lat], duration: FOLLOW_MS * 0.9 });
+      }
 
       barPain.style.width = `${data.pain_level * 100}%`;
       barPanic.style.width = `${data.giant_fiber * 100}%`;

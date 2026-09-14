@@ -24,46 +24,76 @@ Audited defects this pass must close:
 
 ---
 
-## Status: stopped by the user before any gate was worked
+## Status: partly closed during Phase 2 (2026-09-14)
 
-The user ended this pass with "You can stop, I'm happy with how it is so far."
-No gate below was completed, and none should be read as met. Nothing was
-half-built either: the pass had produced only this file and an audit, so the
-repo is exactly as it was at commit `98172fd`, with Phase 1 complete and all
-seven of its own exit criteria passing.
+This pass was originally stopped by the user with "You can stop, I'm happy
+with how it is so far", leaving all twelve gates abandoned. Phase 2 reopened
+four of them, because Phase 2 stacks a navigator directly on top of the
+untested code this file flags — the `.net.xml` parser, the point-to-polyline
+geometry and the BFS — and adding weight to untested foundations was the one
+item worth paying for before building further.
 
-The five defects listed above are real, reproduced, and unfixed. Four of them
-land naturally in PLAN.md's Phase 4 ("Update README to reflect the final
-architecture", "a short setup guide covering the Phase 1 prerequisites"); the
-missing tests do not, and are the item I would pick up first.
+That judgement was vindicated immediately: the first test written against
+`nearest_edge` failed, and the root cause was a real defect in a function
+`PHASE1_REPORT.md` explicitly tells Phase 2 to rely on. See G2.
 
-ABANDON: G1 user stopped the pass; no tests written
-ABANDON: G2 user stopped the pass; no SumoNet fixture written
-ABANDON: G3 user stopped the pass; 7 committed references to gitignored cache/ paths remain
-ABANDON: G4 user stopped the pass; provisioning still only in gitignored cache/provision.sh
-ABANDON: G5 user stopped the pass; bench_tick not moved into the repo
-ABANDON: G6 user stopped the pass; min_syn_count > 1 still never exercised
-ABANDON: G7 user stopped the pass; README.md:78 still claims a FlyWire account is required
-ABANDON: G8 user stopped the pass; DATA_LICENSE.md:35 still says ~25 MB, actual 31.7 MB
-ABANDON: G9 user stopped the pass; report figures not audited as a set
-ABANDON: G10 not run
-ABANDON: G11 not re-run; last full run was 7/7 PASS at 98172fd
-ABANDON: G12 only this file is uncommitted
+**Closed in Phase 2: G1, G2, G10, G11.** Evidence recorded inline below.
+
+**Still deferred: G3, G4, G5, G6, G7, G8, G9, G12.** These are documentation
+staleness, provisioning hygiene, and a never-exercised config path. None
+blocks Phase 2 or Phase 3, and PLAN.md's Phase 4 already owns the README and
+setup-guide work most of them belong to.
+
+ABANDON: G3 deferred to Phase 4; committed references to gitignored cache/ paths remain
+ABANDON: G4 deferred to Phase 4; provisioning still only in gitignored cache/provision.sh
+ABANDON: G5 deferred to Phase 4; bench_tick not moved into the repo. Phase 2 added
+         scripts/bench_sync.py, which measures the SNN tick as one term of the
+         full sync budget, but that is not the script this gate names
+ABANDON: G6 deferred to Phase 3; min_syn_count > 1 still never exercised, now folded
+         into the planned fidelity-versus-noise sensitivity analysis, because
+         changing it re-normalises every row and invalidates the calibrated
+         snn.gain and the vehicle transfer scales together
+ABANDON: G7 deferred to Phase 4; README.md:78 still claims a FlyWire account is required
+ABANDON: G8 deferred to Phase 4; DATA_LICENSE.md:35 still says ~25 MB, actual 31.7 MB
+ABANDON: G9 deferred to Phase 4; Phase 1 report figures not audited as a set.
+         PHASE2_REPORT.md's own figures were audited against command output
+ABANDON: G12 deferred; Phase 2 work is committed locally, but the push to
+         origin/main is the user's to make
 
 ---
 
-- [ ] **G1** Unit tests cover the non-trivial pure logic and pass, with no
+- [x] **G1** Unit tests cover the non-trivial pure logic and pass, with no
       dependency on the 1 GB downloaded corpus.
       CHECK: `cd /mnt/e/Dipteran && python tests/test_units.py`
       EXPECT: exit 0, every test passes, count reported
-      EVIDENCE: pending
+      EVIDENCE: `57/57 passed`, exit 0. Covers point_to_polyline_m (6 cases
+      including the t-clamp and a zero-length segment), _osmids (6), the
+      SumoNet parser and projection (8), _way_index strategy selection (3),
+      the reachability BFS (6), world geometry (12), state classification and
+      telemetry (7), the firing-rate/command boundary (8), and that every
+      resolved cluster has a HUD region (an unmapped one is dropped silently).
+      None touches the downloaded corpus; the SUMO cases run against a
+      synthetic .net.xml written to a temp dir.
 
-- [ ] **G2** The synthetic `.net.xml` fixture exercises the real `SumoNet`
+- [x] **G2** The synthetic `.net.xml` fixture exercises the real `SumoNet`
       parser end to end: origId params, lane shapes, projection,
       `nearest_edge`, `reachable`.
       CHECK: `python tests/test_units.py` includes SumoNet cases
       EXPECT: parser/geometry/BFS assertions present and passing
-      EVIDENCE: pending
+      EVIDENCE: present and passing. The fixture covers internal-edge and
+      shapeless-edge rejection, multi-value origId params on lanes, length as
+      the max over lanes, UTM projection landing inside the configured bbox,
+      the local frame preserving a 100 m edge, one-way BFS reachability, an
+      unreachable island, and connections referencing unindexed internal
+      edges.
+      This gate paid for itself. `test_nearest_edge` failed on first run:
+      `nearest_edge` was a nearest-*vertex* query, returning whichever edge
+      owned the closest shape point. A query 2.000 m from edge `300#0` came
+      back as `200#0` at 49.981 m. PHASE1_REPORT.md tells Phase 2 to use that
+      exact call to decide which edge the vehicle is on. Fixed in
+      dipteran/roads.py to resolve candidates by true point-to-polyline
+      distance within an exact bound of `d0 + max_segment/2`; Phase 1's
+      ID-map statistics are unchanged by the fix.
 
 - [ ] **G3** No committed file references a gitignored path.
       CHECK: `git grep -n "cache/bench\.py\|cache/provision\.sh\|cache/check_patterns\|cache/check_pairs\|cache/probe\.py"`
@@ -107,16 +137,28 @@ ABANDON: G12 only this file is uncommitted
       EXPECT: every figure matches, or is corrected
       EVIDENCE: pending
 
-- [ ] **G10** `ruff check` clean over all tracked Python.
+- [x] **G10** `ruff check` clean over all tracked Python.
       CHECK: `python -m ruff check dipteran/ check_phase1.py main.py scripts/ tests/ --select F,E9`
       EXPECT: "All checks passed!"
-      EVIDENCE: pending
+      EVIDENCE: `All checks passed!` over dipteran/ (config, connectome,
+      roads, navigator, world), scripts/ (bench_sync, extract_neuropils,
+      run_route), tests/, check_phase1.py and main.py. One finding was raised
+      and fixed on the way: an unused `import math` left in navigator.py after
+      the gain-selection rule was rewritten.
 
-- [ ] **G11** All seven Phase 1 exit criteria still pass after every change in
+- [x] **G11** All seven Phase 1 exit criteria still pass after every change in
       this pass. No regression is acceptable.
       CHECK: `DIPTERAN_DATA_ROOT=/opt/dipteran python check_phase1.py`
       EXPECT: 7 PASS, 0 FAIL, exit 0
-      EVIDENCE: pending
+      EVIDENCE: 7 PASS, 0 FAIL, exit 0 — config 0.0s, scaffold 1.0s, osmnx
+      16.4s, sumo_net 22.0s, id_map 251.5s, connectome 19.2s, cell_ids 2.3s.
+      Final run, after both the `nearest_edge` fix and the added
+      `mechano_bristle` cluster; cell_ids reports "9 sensory and 6 motor
+      clusters resolved", with mechano_bristle matching 1417 rows through its
+      declared fallback. The ID-map figures are unchanged from Phase 1's:
+      99.2% coverage, 7.16 m median midpoint gap, 7.74 m p90 and 68.8%
+      pure-geometry agreement — so the fix removed a real hazard without
+      moving any Phase 1 number.
 
 - [ ] **G12** Work committed and pushed to origin/main; working tree clean.
       CHECK: `git status --short && git log --oneline -1 && git rev-parse HEAD origin/main`
