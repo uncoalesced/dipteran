@@ -1,6 +1,8 @@
 # Dipteran route + runtime configuration.
 # No lat/lon constants live in code -- everything routeable is a field here.
 # Loaded and validated by dipteran/config.py (Pydantic).
+#
+# Engineered by uncoalesced.
 
 route:
   name: silk_board_to_tin_factory
@@ -116,6 +118,50 @@ snn:
   # not in it, and never flip an inhibitory synapse excitatory.
   plastic_span: 0.5
 
+  # Resting rate(DNa02_right) - rate(DNa02_left), subtracted in _decode.
+  # Measured, not chosen -- reproduce with scripts/probe_diagnostics.py.
+  # Under information-free drive DNa02-left is silent (0.000 Hz) and
+  # DNa02-right runs at 101.1 Hz, and that is not a reconstruction gap: the
+  # two cells have in-degree 742 vs 751 and input weight 12,237 vs 13,116, so
+  # they are equally well reconstructed and the asymmetry is the recurrent
+  # network's own excitation/inhibition balance. Without this subtraction
+  # `steer` is positive on every tick and the vehicle can only turn right --
+  # precisely the orbit Phase 2 measured (steer_abs_median 0.075, against the
+  # 0.063 this probe reproduces with no directional input at all).
+  #
+  # Measured at the dead-ahead operating point: both PFL3 lobes at
+  # cos(45) * SENSORY_CEILING = 0.283, which is what world.sense() injects
+  # when the fly is pointed straight at the goal. DNa02 right 95.5 Hz, left
+  # 0.0 Hz. With it subtracted, steer decodes as 0.000 dead ahead, +0.046
+  # with the goal hard right and -0.034 hard left -- signed, and usable in
+  # both directions.
+  steer_bias: 0.191
+
+  # -- reward shaping ----------------------------------------------------
+  # Metres of progress that earn a dopamine pulse. Was 100 m. The whole Phase
+  # 2 route run closed 103.6 m in total, so the channel fired at most twice in
+  # 25,727 frames and _reinforce ran homeostasis-only for the entire route --
+  # the single biggest reason no learning was ever observed. At the measured
+  # median speed of 3.82 m/s, 12 m is about three seconds of clean running.
+  progress_threshold_m: 12.0
+
+  # Dopamine scales with how close the goal is: full strength within 500 m,
+  # falling to 2% at 15 km and held there beyond. Inverse-power through both
+  # anchors, the same shape as world.sense()'s odour law. This scales the
+  # magnitude of a *progress* reward -- the gate is still "did I close
+  # distance", so a parked fly earns nothing however close it sits.
+  reward_near_m: 500.0
+  reward_far_m: 15000.0
+  reward_far_scale: 0.02
+
+  # The band that fraction is mapped onto before injection. Deliberately not
+  # the same numbers: PAM's current -> firing response is superlinear near
+  # zero (measured, probe_diagnostics.py Test D), so injecting 0.02 as a
+  # current gives 0.5% of peak dopamine, not 2%. 0.05 is where the measured
+  # curve actually delivers 2%.
+  pam_current_min: 0.05
+  pam_current_max: 1.0
+
 vehicle:
   # The boundary between two different quantities. MotorOutput.throttle is a
   # DNg02 *population firing rate* -- measured at 0.05-0.24, because
@@ -126,7 +172,16 @@ vehicle:
   # snn.sensory_gain does not help -- throttle holds at 0.04-0.05 from 1x to
   # 32x, and past 8x the giant fiber starts firing on 45-70% of ticks.
   throttle_scale: 4.0
-  steer_scale: 2.5
+  # Raised from 2.5 once the steering readout actually carried a signal.
+  # Measured end to end (probe_diagnostics.py Test G), the decoded `steer`
+  # spans about -0.035 to +0.046 across the full range of heading errors. At
+  # 2.5 that is +/-4-5 deg/s of the 45 deg/s the vehicle can do, so a 90
+  # degree turn takes ~20 s and ~75 m of travel -- longer than the gap between
+  # Bangalore junctions, i.e. the fly cannot physically take a turn. At 10.0
+  # the same range maps to roughly +/-20 deg/s, half the available authority,
+  # which turns 90 degrees in ~4.5 s and leaves headroom before the [-1, 1]
+  # clamp.
+  steer_scale: 10.0
   max_speed_ms: 16.0
   max_accel_ms2: 2.5
   brake_ms2: 8.0

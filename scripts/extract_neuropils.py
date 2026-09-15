@@ -24,6 +24,8 @@ crude `super_class`/`cell_class` heuristic, which is all a background scaffold
 needs.
 
     python scripts/extract_neuropils.py
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -77,8 +79,15 @@ CLUSTER_REGION = {
     "compass_epg": "central",
     "acoustic_jo": "auditory",
     "mechano_bristle": "mechano",
-    "steer_l_dna01": "steer",
-    "steer_r_dna02": "steer",
+    # PFL3 is a central-complex population, not a descending one -- it is
+    # where the goal-relative heading error becomes a turn command, one
+    # synapse upstream of DNa02.
+    "steer_drive_pfl3_l": "central",
+    "steer_drive_pfl3_r": "central",
+    "steer_left": "steer",
+    "steer_right": "steer",
+    "steer_trim_l": "steer",
+    "steer_trim_r": "steer",
     "throttle": "throttle",
     "panic_dnp01": "giant",
     "reward_pam": "dopamine",

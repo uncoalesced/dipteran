@@ -76,3 +76,30 @@ data.
 
 [Eclipse SUMO](https://eclipse.dev/sumo/) is used as an external tool, not
 vendored. It is licensed under EPL-2.0.
+
+## Fly sprite (`assets/sprites/fly-dorsal.png`)
+
+The map marker is a dorsal render of the anatomical *Drosophila* body model
+from [TuragaLab/flybody](https://github.com/TuragaLab/flybody) (Turaga Lab /
+Google DeepMind), licensed under the **Apache License 2.0**.
+
+This is the one derived artefact in this repo that ships committed. The FlyWire
+connectome cannot be, because CC BY-NC 4.0 restricts redistribution; Apache-2.0
+does not, and explicitly permits redistribution of derivative works provided
+the licence is retained and modifications are stated.
+
+**Modifications:** the MuJoCo model is loaded at its rest pose, rendered
+orthographically from directly above against an alpha background, cropped to
+the body's bounding box and downsampled to 256×256. No mesh, texture or model
+file from flybody is redistributed — only this rendered image. Reproduce it
+with `python scripts/render_fly_sprite.py`; the model itself is cloned at build
+time and is not vendored here.
+
+The full Apache 2.0 licence text is at
+<https://www.apache.org/licenses/LICENSE-2.0>. Note this is a *separate and
+more permissive* licence than the FlyWire connectome's CC BY-NC 4.0 above —
+the two cover different artefacts and neither supersedes the other.
+
+---
+
+Engineered by uncoalesced.

@@ -1,305 +1,320 @@
-Idea and premise; Take the digital brain of a fruit fly and put it in a virtual version of Bengaluru traffic to see how it performs.
+<p align="center">
+  <img src="assets/banner/dipteran-banner-github.png" alt="Dipteran" width="760">
+</p>
 
-Further details and discussion:
+# Dipteran
 
-System ArchitectureDo not try to build a 3D graphical game engine for this. You want a headless, event-driven loop that feeds live geospatial and traffic data into your spiking neural network (SNN). Two road-network representations feed this loop: an OSMnx/networkx graph the SNN reasons over (bearing, distance to goal), and a SUMO network built from the same OSM extract via netconvert that runs the actual traffic microsimulation. There is no separate live-traffic API — SUMO's own simulated vehicle density on each edge is the congestion signal. +-------------------------------------------------------+
- |                  THE ENVIRONMENT                      |
- |  • Road graph: OSMnx/networkx + SUMO (netconvert),    |
- |    kept in sync via an ID-mapping layer               |
- |  • SUMO microsimulation: background traffic agents    |
- |    -> emergent congestion is the traffic signal        |
- |  • Synthetic Hazards: Potholes, Horns                 |
- +---------------------------+---------------------------+
-                             |
-             Sensory Current Vector (I_ext)
-                             v
- +-------------------------------------------------------+
- |                 THE CONNECTOME (SNN)                  |
- |  • Central Complex: Ring attractor heading compass   |
- |  • Antennal Lobes: DM1 sugar odor concentration       |
- |  • Optic Lobes: T4/T5 optical flow & LC4 looming      |
- |  • Johnston's Organ: Acoustic / vibration mechanosens |
- +---------------------------+---------------------------+
-                             |
-                 Motor Spike Outflow (S_out)
-                             v
- +-------------------------------------------------------+
- |               VEHICLE / AGENT CONTROLLER              |
- |  • DNa01 / DNa02: Steering angle (Steer L/R)          |
- |  • Wing-beat / Leg Motor: Throttle / Brake            |
- |  • Giant Fiber (DNp01): Emergency Brake / Panic Swerve|
- +-------------------------------------------------------+
-Biological Sensory & Motor Mapping1. How It Navigates Without Turn-by-Turn GPSFlies track wind and odor gradients through chemotaxis and orient themselves using the Central Complex (CX) ring attractor.The Odor Beacon (Destination): Treat Point B (e.g., Tin Factory Click to open side panel for more information  as an open vat of fermenting vinegar emitting an inverse-square concentration gradient:$$\text{Concentration}(x, y) = \frac{1}{\text{dist}((x, y), \text{Target})}$$This concentration is injected directly as continuous current into the fly’s DM1/DM4 olfactory projection neurons. When the vehicle moves closer to the destination, the concentration rises.The Sun Compass (Heading): The EPG neurons in the Ellipsoid Body maintain a physical bump of electrical activity that tracks heading. You inject current into the EPG ring corresponding to the bearing of the target relative to the vehicle's current orientation.2. Translating Traffic Chaos into Insect HellTraffic Gridlock (Zero Optic Flow):Flies rely on Lobula Plate Tangential Cells (LPTCs) to measure optical flow. When a fly attempts to flap its wings (throttle) but optical flow remains zero (stuck behind a SUMO-simulated jam at Silk Board), the fly interprets this as being trapped in a spider web or caught in sap. This causes motor firing to escalate into sustained panic convulsions.Auto-Rickshaws Cutting In (Looming Threats):Auto-rickshaws and buses are real SUMO microsimulation agents, not scripted events. Geometric near-collision detection between the fly-vehicle and a nearby SUMO agent aggressively cutting across your bumper produces rapid angular expansion in the forward field of view. This angular expansion triggers the fly's LC4 and LPLC2 looming detectors, which fire directly into the Giant Fiber (DNp01), forcing instantaneous hard-braking or an uncontrolled swerve onto the shoulder.Potholes & Broken Roads (Mechanosensory Shocks):When hitting an unpaved ditch or crater on the Outer Ring Road, the vertical acceleration spikes the chordotonal organ and campaniform sensilla (insect strain sensors). This immediately triggers the fly's grooming and freezing circuits, temporarily disabling forward movement.Unrelenting Horn Blasts (Acoustic Overdrive):Honking (500–800 Hz) falls squarely into the acoustic receptive field of the fly's Johnston's organ (used in nature for courtship songs and predator warning). High-decibel horn traffic inundates the acoustic projection neurons (aPNs), destabilizing its internal compass.3. Motor Decoding to Vehicle DynamicsYou monitor three specific motor neuron clusters from the simulation:Steering: DNa01 (descending neuron for left turns) and DNa02 (descending neuron for right turns). Subtracting their spike rates gives continuous steering torque:$$\tau_{\text{steer}} = \text{Spikes}(\text{DNa01}) - \text{Spikes}(\text{DNa02})$$Acceleration / Brake: Forward wing-motor circuits (B1, B2) determine throttle. If the Giant Fiber (DNp01) fires, override throttle to 0 and slam full emergency braking.The Reinforcement Loop: Neurotransmitter PunishmentYou run real-time neuromodulatory updates on the mushroom body synapses without backpropagation:The PAM Cluster (Sugar Reward): Every time the agent covers 100 meters closer to Point B or maintains a clean cruising speed above 30 km/h, inject a short pulse into the PAM dopaminergic neurons.The PPL1 Cluster (Electric Shock / Thermal Pain): If the vehicle remains stationary at an intersection for more than 45 seconds, hits a pothole, or gets trapped in a dead end, pulse the PPL1 dopaminergic cluster. This mimics physical torture, forcing the synapses between current visual cues and motor paths to weaken.Step-by-Step Implementation StackStep 1: Extract the Road Graph via OSMnxInstead of paying Google Maps API costs for every simulation step, pull the actual road topology of the target route using OpenStreetMap:Pythonimport osmnx as ox
-import networkx as nx
+A fruit fly's brain drives a car through Bangalore traffic.
 
-# Download the drivable road network between Silk Board and Tin Factory
-point_a = (12.9177, 77.6238) # Silk Board
-point_b = (13.0039, 77.6653) # Tin Factory
+The 138,639-neuron FlyWire reconstruction of an adult *Drosophila
+melanogaster* runs as a spiking network on the GPU. Its sensory neurons get
+fed a live simulation of Bangalore: an odour gradient pointing at wherever you
+told it to go, a compass, optic flow, looming auto-rickshaws, horn blasts,
+potholes. Its descending motor neurons are read back out as steering and
+throttle. There's no route planner anywhere in the loop. The fly smells its
+destination and tries to get there, the way a real one would smell fermenting
+fruit.
 
-G = ox.graph_from_point(point_a, dist=15000, network_type='drive')
-Step 2: Run SUMO as the Traffic SourceBuild a SUMO network from the same OSM extract via netconvert, and run SUMO with background vehicle agents on it. Read each edge's live simulated speed/density directly from SUMO's traffic state — no external traffic API call. Color-code edges in the graph with speed coefficients ($v_{\text{edge}} / v_{\text{max}}$) derived from that SUMO state. Edges with heavy simulated congestion impose zero forward velocity and high tactile vibration penalties.Step 3: Run the Spiking Connectome LoopRun this on your headless server. Every 20ms physics tick:Calculate target heading and distance.Read current road condition (speed, congestion, obstacles).Populate the sensory input array ($I_{\text{ext}}$).Run 10 ticks of Leaky Integrate-and-Fire matrix multiplication.Decode DNa01, DNa02, and DNp01 spikes to determine the vehicle's new heading and velocity along the graph edges.Pythonimport torch
+It's bad at this, which is most of the point.
 
-class FlyBangaloreNavigator:
-    def __init__(self, adj_matrix_csr, sensory_ids, motor_ids):
-        self.W = adj_matrix_csr
-        self.n_neurons = adj_matrix_csr.shape[0]
-        self.v = torch.zeros(self.n_neurons)
-        self.v_rest = 0.0
-        self.v_thresh = 1.0
-        self.v_reset = -0.2
-        self.decay = 0.9
-        
-        self.sensory_ids = sensory_ids  # {'odor': [...], 'looming': [...]}
-        self.motor_ids = motor_ids      # {'steer_l': id, 'steer_r': id, 'panic': id}
+---
 
-    def step(self, external_currents):
-        # external_currents: dict of {neuron_index: current_value}
-        i_ext = torch.zeros(self.n_neurons)
-        for nid, val in external_currents.items():
-            i_ext[nid] = val
+## Setup
 
-        # Leaky integrate-and-fire dynamic
-        synaptic_input = torch.sparse.mm(self.W, self.v.unsqueeze(1)).squeeze(1)
-        self.v = (self.v * self.decay) + synaptic_input + i_ext
-        
-        spikes = (self.v >= self.v_thresh).float()
-        self.v[spikes.bool()] = self.v_reset
-        
-        # Readout motor commands
-        steer = spikes[self.motor_ids['steer_l']] - spikes[self.motor_ids['steer_r']]
-        panic = spikes[self.motor_ids['panic']]
-        
-        return steer.item(), panic.item()
-Step 4: Visualizing the DisasterRun a lightweight dashboard (using Streamlit or a fast HTML5 Canvas client over WebSockets) displaying:The OpenStreetMap route with the agent's GPS dot erratically swerving, taking wrong turns down unpaved alleys, or getting wedged at junctions.An active spike raster plot of the fly's brain regions, showing visual and escape neurons firing continuously as it navigates the traffic.
+You need a CUDA GPU, roughly 11 GB of free RAM, and about 30 GB of disk for
+the OSM extract, the SUMO network and the connectome. Linux or WSL2 is the
+tested path. Neither the connectome nor the road network is in this repo, for
+licensing reasons covered in [DATA_LICENSE.md](DATA_LICENSE.md); both get
+downloaded on first run.
 
+**1. Python dependencies.**
 
-Dropping this 140,000-neuron brain at Central Silk Board and demanding it reach Tin Factory or Whitefield with zero routing instructions forces its survival loops into direct conflict with gridlock, lane indiscipline, and potholes.
+```bash
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+```
 
-If this is an open-source showcase, go with a FastAPI backend streaming over WebSockets into a single-file vanilla HTML/JS frontend powered by MapLibre GL JS and Tailwind CSS. There are zero npm builds or node modules required — the frontend is a single command away, `python main.py`. The full backend, however, is not a zero-setup toy: running the real (non-mock) pipeline requires a CUDA-capable GPU, a local SUMO install, and your own FlyWire/CAVE account to fetch the connectome (FlyWire data carries a use agreement and cannot be bundled in this repo). See PLAN.md for the full prerequisite list and build roadmap.
+The torch line has to come from the CUDA 12.8 index and it has to be separate.
+This was built on a Blackwell card (sm_120), and older wheels ship no kernels
+for it. They import fine and then die at the first kernel launch, which is a
+genuinely annoying way to find out.
 
-The Stack Architecture
-[ Headless SNN Engine ]
-        │ (Inter-thread Queue)
-        ▼
-[ FastAPI WebSocket Server ]
-        │  JSON Stream @ 20-30 Hz: { lat, lon, heading, brain_state, event }
-        ▼
-[ Single-file index.html ]
-   ├── MapLibre GL JS (Hardware-accelerated 60 FPS icon interpolation)
-   ├── Bounding Box Mask (Locked strictly to Bangalore)
-   └── Bottom-Right HUD (Neurological telemetry & live event terminal)
-Key Frontend Components
-1. The Bangalore Bounding Box Constraint
-MapLibre lets you hardcode a strict bounding box. Users cannot pan or zoom out to the rest of India; the camera bounces back if dragged beyond city limits:
+**2. SUMO.** Not pip-installable. Get it from your package manager so
+`netconvert` lands on PATH, or point `sumo.binary_dir` in `config.yaml` at
+wherever you put it.
 
-JavaScript
-// Strict Bangalore coordinate envelope (SW to NE)
-const BANGALORE_BOUNDS = [
-  [77.40, 12.80], // Kengeri / Electronic City South
-  [77.80, 13.15]  // Yelahanka / Devanahalli North
-];
+```bash
+sudo apt-get install sumo sumo-tools sumo-doc
+```
 
-const map = new maplibregl.Map({
-  container: 'map',
-  style: 'https://tiles.openfreemap.org/styles/liberty', // 100% free, no API keys
-  center: [77.6238, 12.9177], // Silk Board
-  zoom: 13,
-  maxBounds: BANGALORE_BOUNDS,
-  maxPitch: 45 // Slanted 3D camera follow
-});
-2. The Three Custom Map Layers
+**3. Build the road network.** One Overpass query, then netconvert, then the
+OSMnx-to-SUMO edge join. A few minutes, all of it into `cache/`.
 
-Point A (Start Pin): An icon anchored at your chosen origin (e.g., Silk Board junction).
+```bash
+python -m dipteran.roads
+```
 
-Point B (Target Beacon): A pulsating fermentation/sugar icon (e.g., a glowing yellow/orange halo at Tin Factory).
+**4. Fetch the connectome.** Pulls the FlyWire v783 edge list from Zenodo and
+the annotation table from GitHub, collapses 54.5 million synapses into one
+signed weight per neuron pair, and resolves the 19 named sensory and motor
+populations to real root IDs.
 
-The Fly Agent: A custom SVG marker with dynamic rotation. You update marker.setLngLat([lon, lat]) and marker.setRotation(heading) on every WebSocket message with CSS linear interpolation for smooth movement.
+```bash
+python -m dipteran.connectome
+```
 
-The Purgatory Trail: A GeoJSON LineString layer trailing behind the fly that records its erratic route, color-coded red wherever it hit severe traffic or panic-swerved.
+You don't need a FlyWire account for the bulk archive. Redistribution is a
+different matter, which is why `data/` and `cache/` are gitignored in full.
 
-3. The Bottom-Right "Brain State & Horror Log" HUD
-A floating translucent dark glass panel (backdrop-blur-md bg-black/80) anchored to the bottom right with two distinct modules:
+**5. Optional: the brain visualiser.** Builds the per-neuropil point cloud the
+HUD renders. Skip it and the HUD just tells you it's missing.
 
-Bio-Telemetry Gauges:
+```bash
+python scripts/extract_neuropils.py
+```
 
-Dopamine Level (Sugar PAM vs. Pain PPL1): A split bar showing whether the fly is currently experiencing reward or sheer agony.
+If you're moving the multi-GB artifacts off a slow mount, set
+`DIPTERAN_DATA_ROOT` and every relative path in `config.yaml` resolves against
+that instead of the repo root.
 
-Giant Fiber Voltage (DNp01): A sparkline or gauge indicating how close it is to an emergency panic takeoff.
+---
 
-Compass Heading Bump: A tiny radial ring showing the active EPG neuron cluster in the Ellipsoid Body.
+## Launch
 
-Live Event Terminal: A scrolling monospace log showing biological triggers:
+```bash
+python main.py
+```
 
-Plaintext
-[12.924, 77.631] LC4 SPIKE: Auto-rickshaw cut-in detected (0.8m margin)
-[12.926, 77.632] DNp01 FIRED: Panic swerve executed into bus lane
-[12.929, 77.635] MECHANOSENSORY SHOCK: Unmapped crater pothole hit
-[12.929, 77.635] PPL1 BURST: 450mV pain injection (Synaptic depression)
-[12.931, 77.639] LPTC ZERO-FLOW: Silk Board stagnation (Spiderweb dread)
-Minimal Complete Scaffold
-Save these two files in your repo root. This scaffold is a placeholder: the streamer below drives heading with random.random() drift instead of a real SNN, and moves the vehicle with free-form lat/lon updates rather than the hybrid motion model (continuous heading/position, soft-pulled toward the nearest road edge) described in PLAN.md. Replace the mock step with FlyBangaloreNavigator.step() and real SUMO/OSMnx state per the roadmap.
+Serves the map at http://127.0.0.1:8000 in mock mode: a random walk, no
+connectome, starts instantly. Good for checking the frontend works and nothing
+else.
 
-main.py (FastAPI Server & Mock SNN Streamer)
-Python
-import asyncio
-import math
-import random
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
+For the real thing:
 
-app = FastAPI()
+```bash
+DIPTERAN_LIVE=1 python main.py
+```
 
-with open("index.html") as f:
-    HTML_CONTENT = f.read()
+Mock is the default because live mode costs about 28 seconds to build the
+connectome plus another 75 to 130 for SUMO to parse the 862 MB network, which
+isn't what you want from `python main.py` with no arguments. Either way,
+nothing boots until you've picked a route, so you won't pay that cost by
+accident.
 
-@app.get("/")
-def get_ui():
-    return HTMLResponse(HTML_CONTENT)
+---
 
-@app.websocket("/ws")
-async def simulation_feed(ws: WebSocket):
-    await ws.accept()
-    
-    # Starting coordinates: Silk Board Junction
-    lat, lon = 12.9177, 77.6238
-    heading = 45.0  # Heading North-East toward Tin Factory
-    
-    events = [
-        "LC4 SPIKE: Auto cut-in detected",
-        "POTHIOLE HIT: Campaniform sensilla shock",
-        "BMTC BUS LOOM: Giant Fiber evasion triggered",
-        "ZERO OPTIC FLOW: Stagnant gridlock panic",
-        "JOHNSTON'S ORGAN: 110dB Pressure horn blast"
-    ]
+## How to use it
 
-    while True:
-        # Replace this mock step with your actual SNN step function
-        drift = (random.random() - 0.5) * 20
-        heading = (heading + drift) % 360
-        rad = math.radians(heading)
-        
-        # Advance coordinates based on heading
-        speed = 0.00005
-        lat += math.cos(rad) * speed
-        lon += math.sin(rad) * speed
-        
-        # Biometrics
-        pain = random.uniform(0.1, 0.9)
-        panic = random.uniform(0.0, 1.0)
-        active_event = random.choice(events) if random.random() < 0.15 else None
+Open the page. It asks two questions and then gets out of the way.
 
-        payload = {
-            "lat": lat,
-            "lon": lon,
-            "heading": heading,
-            "sugar_reward": round(1.0 - pain, 2),
-            "pain_level": round(pain, 2),
-            "giant_fiber": round(panic, 2),
-            "event": active_event
-        }
-        
-        await ws.send_json(payload)
-        await asyncio.sleep(0.05)  # 20 Hz tick
-index.html (Standalone Frontend)
-HTML
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Drosophila Bangalore Purgatory</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
-  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
-  <style>
-    body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-    #map { width: 100%; height: 100%; }
-  </style>
-</head>
-<body class="bg-gray-900 text-white font-sans">
-  <div id="map"></div>
+1. **Click your destination.** This is the odour source. The fly gets a
+   concentration gradient toward it and nothing else — no waypoints, no turn
+   list. Anywhere inside the road network extract works.
+2. **Click your starting point.** The fly spawns on the nearest road to your
+   click, dropped into 300 background SUMO vehicles.
+3. **Press "Release the fly."** In live mode that button is the boot trigger.
+   The connectome build and the SUMO parse both happen behind it, so expect
+   two or three minutes of status text before anything moves.
 
-  <!-- Bottom Right Telemetry & Event HUD -->
-  <div class="absolute bottom-6 right-6 w-96 bg-black/85 backdrop-blur-md border border-neutral-800 rounded-xl p-4 shadow-2xl flex flex-col gap-3 pointer-events-auto">
-    <div class="flex items-center justify-between border-b border-neutral-800 pb-2">
-      <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome Vitals</span>
-      <span class="text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono">FAFBv14 LIVE</span>
-    </div>
+There's a "Use default" button if you just want the route everything was
+measured on, Central Silk Board to Tin Factory, 10.6 km.
 
-    <!-- Gauges -->
-    <div class="grid grid-cols-2 gap-2 text-xs font-mono">
-      <div>
-        <span class="text-neutral-400">PPL1 (Pain):</span>
-        <div class="w-full bg-neutral-800 h-2 rounded overflow-hidden mt-1">
-          <div id="bar-pain" class="bg-red-500 h-full w-0 transition-all duration-100"></div>
-        </div>
-      </div>
-      <div>
-        <span class="text-neutral-400">DNp01 (Panic):</span>
-        <div class="w-full bg-neutral-800 h-2 rounded overflow-hidden mt-1">
-          <div id="bar-panic" class="bg-amber-500 h-full w-0 transition-all duration-100"></div>
-        </div>
-      </div>
-    </div>
+Once it's running you get three things. The map, with the fly rotated to its
+actual heading and background traffic drawn as a GeoJSON layer. The point
+cloud top-left, where each neuropil lights up with its own firing rate. And
+the vitals panel bottom-right, collapsed by default, which opens into the PPL1
+pain bar, the DNp01 giant-fiber bar, and a running log of what the brain just
+did to itself.
 
-    <!-- Event Terminal -->
-    <div class="mt-1">
-      <span class="text-[10px] uppercase font-mono tracking-wider text-neutral-500">Neural Event Log</span>
-      <div id="terminal" class="h-28 overflow-y-auto font-mono text-[11px] text-neutral-300 flex flex-col-reverse gap-1 mt-1 bg-black/50 p-2 rounded border border-neutral-900">
-        <div class="text-neutral-600">> Initializing Central Complex compass...</div>
-      </div>
-    </div>
-  </div>
+One SUMO process and one GPU-resident connectome exist per server, so everyone
+connected watches the same fly, and changing the route means a restart.
 
-  <script>
-    const BANGALORE_BOUNDS = [[77.40, 12.80], [77.80, 13.15]];
+### Other things you can run
 
-    const map = new maplibregl.Map({
-      container: 'map',
-      style: 'https://tiles.openfreemap.org/styles/dark',
-      center: [77.6238, 12.9177],
-      zoom: 14,
-      maxBounds: BANGALORE_BOUNDS
-    });
+```bash
+python tests/test_units.py                     # 74 unit tests, no FlyWire download needed
+python scripts/run_route.py --max-minutes 60   # full route, with drift and geography reporting
+python scripts/probe_diagnostics.py            # reproduces every steering figure below
+python -m dipteran.navigator                   # the LIF gain calibration sweep
+python -m dipteran.roads                       # rebuilds and re-verifies the road network
+```
 
-    // Create Fly Marker Element
-    const flyEl = document.createElement('div');
-    flyEl.innerHTML = `
-      <div style="transform-origin: center; transition: transform 0.05s linear;">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5">
-          <circle cx="12" cy="12" r="5" fill="#22c55e"/>
-          <line x1="12" y1="2" x2="12" y2="7" />
-          <line x1="7" y1="7" x2="17" y2="17" stroke-dasharray="2 2"/>
-        </svg>
-      </div>`;
-    const flyMarker = new maplibregl.Marker({ element: flyEl }).setLngLat([77.6238, 12.9177]).addTo(map);
+---
 
-    // WebSocket Stream Reader
-    const ws = new WebSocket(`ws://${location.host}/ws`);
-    const term = document.getElementById('terminal');
-    const barPain = document.getElementById('bar-pain');
-    const barPanic = document.getElementById('bar-panic');
+## How it works
 
-    ws.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      
-      flyMarker.setLngLat([data.lon, data.lat]);
-      flyEl.firstElementChild.style.transform = `rotate(${data.heading}deg)`;
-      map.easeTo({ center: [data.lon, data.lat], duration: 50 });
+Two road-network representations, built from one shared OSM extract and joined
+by ID. OSMnx gives the graph the fly reasons over, bearing and distance to
+goal. netconvert gives SUMO the network its traffic actually drives on. The
+join matches OSM way IDs first to narrow the candidates cheaply, then uses
+polyline distance to decide which of those candidates really overlap — one
+long OSM way splits into many edges in both graphs, so a pure way-ID join is
+far too coarse.
 
-      barPain.style.width = `${data.pain_level * 100}%`;
-      barPanic.style.width = `${data.giant_fiber * 100}%`;
+The live loop never parses `.net.xml` itself. It can't afford to: `sumo` alone
+measures 7.4 GB resident against an 11 GB ceiling, so every geometric question
+gets asked of the already-running SUMO process over traci rather than a second
+resident copy of the network.
 
-      if (data.event) {
-        const item = document.createElement('div');
-        item.className = "text-amber-400/90";
-        item.textContent = `> ${data.event}`;
-        term.prepend(item);
-      }
-    };
-  </script>
-</body>
-</html>
+The connectome becomes a sparse CSR tensor `W` where `W[i,j]` is presynaptic
+`j` onto postsynaptic `i`, so one LIF step is `W @ v`. Signs come from each
+presynaptic neuron's consensus transmitter, following Dale's principle instead
+of going per-synapse. Dopaminergic, serotonergic and octopaminergic rows are
+dropped from that fast path entirely and act through a plastic overlay, which
+is closer to what monoamines do anyway.
 
+The vehicle is a free body — `moveToXY` with `keepRoute=2`, soft-pulled toward
+the nearest road rather than constrained to a route. It can end up somewhere
+stupid. That's allowed.
 
-To document this project accurately, you need to separate the biological reality and physical engineering from the computational and philosophical hype.What "Taking the Brain" Actually MeantThe dataset was not extracted with non-invasive scans like an MRI. It was an irreversible, destructive physical dissection carried out on a single adult female Drosophila melanogaster at the Howard Hughes Medical Institute’s (HHMI) Janelia Research Campus (led by Davi Bock and Zhihao Zheng, published in Cell in 2018 as the FAFB dataset):  Dissection & Fixation: The fly was sacrificed, and its brain (roughly 1 mm wide) was micro-dissected from its head capsule. It was treated with chemical fixatives (glutaraldehyde and formaldehyde) to crosslink all cellular proteins, followed by osmium tetroxide and heavy metal stains. Heavy metals bind to lipid cell membranes, making them opaque to electrons.Plastic Embedding: The stained tissue was dehydrated and embedded into a hard block of epoxy resin plastic. At this point, the brain was an inanimate piece of plastic-encased carbon and heavy metals.Serial Ultra-Thin Sectioning: Using an ultramicrotome with a diamond blade, the resin block was sliced into 7,050 consecutive ribbons, each only 40 nanometers thick (roughly 1/2,000th the thickness of a sheet of paper).  Electron Microscopy: Each slice was photographed using a custom high-throughput Serial Section Transmission Electron Microscope (ssTEM) at a resolution of 4 nanometers per pixel. The resulting dataset was a 100+ terabyte stack of 2D cross-sectional images.The specimen was physically destroyed in the process. The resulting digital asset is not a living entity, but a post-mortem architectural blueprint.The Scientists and the Reconstruction PipelineTurning 100 terabytes of gray electron-dense cross-sections into a searchable 3D graph took nearly a decade and culminated in a landmark package of papers published in Nature in October 2024:  The Leaders: The FlyWire Consortium was co-led by Sebastian Seung (computational neuroscientist and computer science professor) and Mala Murthy (director of the Princeton Neuroscience Institute) at Princeton University. Key collaborators included Gregory Jefferis and Philipp Schlegel at the MRC Laboratory of Molecular Biology (LMB) in Cambridge, UK.  Computer Vision (Segmentation): AI models (Convolutional Neural Networks and 3D U-Nets developed by Seung's lab and Google Research) analyzed pixel intensities across the 7,050 slices, tracing continuous cell boundaries to reconstruct 3D neuronal branches.Crowdsourced Proofreading: Automated segmentation made thousands of errors (fusing adjacent neurons or severing thin axons). Seung and Murthy created FlyWire, an open-source, web-based platform where 287 researchers across 76 laboratories globally spent years manually auditing and proofreading cell connections.  Final Deliverable:139,255 proofread neurons.~54.5 million chemical synapses.Machine learning classification of neurotransmitter types (acetylcholine, GABA, glutamate, dopamine, serotonin, octopamine) for nearly every synapse based on vesicle clustering and pre-synaptic T-bar morphology. Access terms: this data is distributed under a data use agreement via the CAVE platform, not freely redistributable — this repo does not and cannot bundle the connectome itself; each user fetches it under their own FlyWire account.What the Connectome Has vs. What It LacksWhen you download the dataset, you are getting an adjacency matrix (a directed graph of nodes and weighted edges) along with spatial coordinates and cell annotations.Included in the DatasetCompletely Missing from the DatasetPhysical wiring (which neuron touches which)Ion channel dynamics: Hodgkin-Huxley conductances, resting voltages, and activation curves.Synaptic counts and spatial coordinatesNeuromodulatory volume transmission: Extracellular washes of dopamine or neuropeptides that diffuse outside classical synapses.Predicted neurotransmitter types (excitatory vs. inhibitory)Electrical synapses (Gap junctions): Sub-nanometer protein pores generally invisible at 40nm EM slice resolution.Static morphology (axon/dendrite geometry)Intracellular state: Metabolic energy stores (ATP), second-messenger signaling ($IP_3, cAMP$), and gene transcription.Proofread cell-type categorizationsGlia: The non-neuronal support cells that regulate neurotransmitter reuptake and ionic balance.Replicating Consciousness vs. Programming an EmulationDoes running this connectome replicate the fly's consciousness, or is it an illusion?1. What "Consciousness" Means for a Fruit FlyEthologists and neurobiologists agree that flies do not possess higher-order metacognition or linguistic self-awareness. However, behavioral experiments demonstrate that fruit flies exhibit primary subjective awareness and primitive affective states:They show valence states (hunger, satiety, fear, sexual arousal) driven by internal dopamine and octopamine circuits.They exhibit selective attention (tracking one visual target while actively suppressing distractors).They show nociceptive avoidance and state-dependent behavioral persistence (e.g., remaining agitated and hyper-vigilant for minutes after an electric shock or predator strike).2. The Simulation Reality: Emulation, Not ReincarnationWhen you run the connectome on your laptop, you are not replicating its subjective consciousness. You are executing a mathematical emulation of its input-output transfer function.The Circuit Logic Is Biological: The underlying graph reflects millions of years of evolutionary optimization. Hardwired circuits—like the Central Complex ring-attractor compass or the Giant Fiber looming escape loop—work in simulation because their computational topology is real.The Physics Is Artificial: To make it run, you supply simplified mathematical abstractions (such as Leaky Integrate-and-Fire equations). You choose an arbitrary resting membrane potential, an arbitrary firing threshold, and an arbitrary decay rate. The simulation behaves like a fly because the network topology enforces biological constraints, but it lacks the biochemical and biophysical richness that generated the animal's living internal state.The "Wet Rain" Distinction: John Searle famously framed this problem using weather: a computer simulation of a Category 5 hurricane can compute the Navier-Stokes equations with mathematical precision, but not a single molecule of water gets wet. Simulating the differential equations of a fly's membrane potential computes the math of neural transmission, but it does not reproduce the biological substrate.You are not bringing a dead fly's soul back to life inside a digital cage. You are taking the structural skeleton of an insect's evolutionary decision-tree, writing the missing biophysical laws yourself, and observing how that hardwired geometry behaves when subjected to arbitrary inputs.#   d i p t e r a n  
- 
+### Steering, and why the first version of it was wrong
+
+The original readout was `rate(DNa01) - rate(DNa02)`. It looked reasonable and
+it was a category error. DNa01 and DNa02 are functionally distinct circuits
+with largely non-overlapping inputs, and both patterns pooled across the left
+and right copies, so the difference was measuring baseline excitability
+between two cell types rather than any left-right asymmetry. Probed at rest
+with no directional input at all it returns +0.063, which is almost exactly
+the 0.075 constant turn rate the vehicle had been orbiting at for 25,727
+frames.
+
+It's now `rate(DNa02_right) - rate(DNa02_left)`, side-split, matching the
+relationship the 2024 Nature paper measured directly against rotational
+velocity. A calibrated `snn.steer_bias` of 0.191 comes off the top, because
+DNa02-left sits at 0.0 Hz while DNa02-right runs at about 95. That isn't a
+reconstruction gap: in-degree is 742 against 751 and input weight 12,237
+against 13,116, so both cells are reconstructed about equally well. The left
+one is just quiet.
+
+Directional drive goes into PFL3, not the odour PNs. Six projection neurons
+can't move a cell with in-degree 742, and measuring it confirmed as much —
+they shift DNa02 by 2.2 Hz in the wrong direction. PFL3 gives 40.3 Hz of
+monotonic authority. The projection is contralateral, 12 synapses from
+PFL3-right onto DNa02-left and zero ipsilateral, read straight out of `W`, so
+a goal on the right drives the *left* lobe. There's a unit test asserting that
+sign, because a plausible-looking backwards formula is exactly the bug that
+got caught twice during design.
+
+Measured end to end: -4.1°/s for a goal 90° left, +5.2°/s for 45° right,
++0.005°/s dead ahead.
+
+### Reward
+
+Dopamine scales with how close the goal is: full strength within 500 m,
+falling to 2% at 15 km, mapped through `snn.pam_current_min/max` because PAM's
+current-to-firing transfer is superlinear near zero. Inject 0.02 raw and you
+get 0.5% of peak firing, not 2%.
+
+The progress threshold that gates it dropped from 100 m to 12 m. At the
+measured median speed the old one fired at most twice across a 25,727-frame
+run, which meant plasticity ran homeostasis-only for essentially the entire
+experiment. Punishment comes from PPL1 on stalls, potholes and
+near-collisions.
+
+---
+
+## Where it actually is
+
+The unit suite passes, ruff is clean, and each module self-checks on
+`python -m dipteran.<module>`. The full loop runs at 1.27x real time —
+78.6 ms of work in a 100 ms frame — for 25,727 consecutive frames with no
+stalls and bounded plastic weight drift.
+
+Phase 3 fixed the steering, and the steering now demonstrably points the right
+way. Two things about it are still wrong. `steer` saturates on the left,
+because DNa02-left is floored, so left turns come out roughly constant no
+matter how large the error is. And the dead zone past 135° of error relies on
+a small residual right-drift to sweep out of it, which works but isn't a
+mechanism anyone designed.
+
+**No learning has been demonstrated.** Episodic training is implemented and
+the dopamine channel can now fire, which it previously couldn't. Nobody has
+run the multi-episode experiment yet. Don't read the reinforcement section
+above as a claim that anything has actually been learned.
+
+---
+
+## Where the fly's brain came from
+
+Worth being precise about, because "we took a fly's brain" invites the wrong
+picture.
+
+The dataset came from an irreversible physical dissection of one adult female
+*Drosophila melanogaster*, done at HHMI Janelia by Davi Bock and Zhihao Zheng
+and published in Cell in 2018 as FAFB. The fly was killed and its 1 mm brain
+micro-dissected out of the head capsule. Glutaraldehyde and formaldehyde
+crosslinked the proteins; osmium tetroxide and heavy metal stains bound to the
+lipid membranes to make them opaque to electrons. The tissue was dehydrated
+and embedded in epoxy resin, at which point it was a piece of plastic-encased
+carbon and metal. An ultramicrotome with a diamond blade then sliced that
+block into 7,050 consecutive sections at 40 nanometres each, about a
+two-thousandth the thickness of a sheet of paper, and every slice was
+photographed on a custom serial-section transmission electron microscope at
+4 nm per pixel. The output was over 100 terabytes of grey cross-sections.
+
+Turning that into a searchable graph took most of a decade and landed as a
+package of Nature papers in October 2024. The FlyWire consortium was co-led by
+Sebastian Seung and Mala Murthy at Princeton, with Gregory Jefferis and
+Philipp Schlegel at the MRC LMB in Cambridge. 3D U-Nets traced cell boundaries
+across the slices. Automated segmentation made thousands of errors, fusing
+adjacent neurons and severing thin axons, so 287 researchers across 76 labs
+proofread the result by hand on an open web platform. What came out: 139,255
+proofread neurons, roughly 54.5 million chemical synapses, and a
+machine-learning transmitter call for nearly every one of them.
+
+What the dataset doesn't contain is most of what makes a neuron work. There
+are no ion channel dynamics in it, no conductances or resting voltages. It has
+nothing on volume transmission, the extracellular washes of dopamine and
+neuropeptides that diffuse nowhere near a classical synapse. Gap junctions are
+generally invisible at 40 nm, so they aren't there either, and neither is
+metabolic state, second messengers, or transcription. Glia are absent
+entirely.
+
+So this project supplies all of that itself, badly. The resting potential,
+firing threshold and decay rate in `config.yaml` are numbers somebody picked.
+The circuit topology is real and evolutionarily optimised; the physics laid
+over it is invented.
+
+Searle's version of the problem: a simulation of a hurricane can compute
+Navier-Stokes to arbitrary precision and not one molecule of water gets wet.
+Simulating a membrane potential computes the arithmetic of neural
+transmission. It doesn't reproduce the substrate. Nothing here is a fly.
+Nothing here is conscious. If it looks like it's trying to get somewhere,
+that's the topology doing its job.
+
+---
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `dipteran/roads.py` | OSM extract, both graph representations, the ID join, a from-scratch `.net.xml` parser |
+| `dipteran/connectome.py` | FlyWire fetch, adjacency build, the 19 named cell populations |
+| `dipteran/navigator.py` | The LIF step and the three-factor reinforcement rule |
+| `dipteran/world.py` | SUMO over traci, sensory encoding, motor decoding, the vehicle's motion |
+| `dipteran/config.py` | Pydantic schema for `config.yaml` |
+| `main.py` | FastAPI, the route endpoints, the WebSocket stream |
+| `index.html` | The whole frontend, one file, no build step |
+| `scripts/probe_diagnostics.py` | Every steering and reward figure in this README |
+
+Everything tunable lives in [config.yaml](config.yaml): coordinates, bounding
+box, device and dtype, every LIF and reinforcement parameter, every motor
+transfer scale, all file paths. No hardcoded coordinates or tuning constants
+anywhere in the code. Run `python -m dipteran.config` and it'll tell you if the
+file is wrong.
+
+---
+
+## Licensing
+
+The code is MIT. The data isn't, and the two are independent of each other.
+FlyWire gets fetched at runtime under your own agreement and should be treated
+as CC BY-NC 4.0. The map marker derives from
+[TuragaLab/flybody](https://github.com/TuragaLab/flybody), which is Apache-2.0
+and therefore the one asset actually committed here. OpenStreetMap is ODbL.
+[DATA_LICENSE.md](DATA_LICENSE.md) has the detail and the citations you owe.
+
+---
+
+<p align="center"><sub>Engineered by uncoalesced.</sub></p>

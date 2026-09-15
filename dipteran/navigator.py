@@ -26,6 +26,8 @@ with the real matrix, and each is corrected here:
 The reinforcement rule is the three-factor one PLAN.md section 4 asks for:
 an eligibility trace of recent (motor, presynaptic) coincidence, gated by the
 PAM-minus-PPL1 dopamine signal. No backpropagation anywhere.
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ STATES = (
 class MotorOutput:
     """One tick of decoded motor state, all in [0, 1] except steer."""
 
-    steer: float = 0.0          # -1 hard left (DNa01) .. +1 hard right (DNa02)
+    steer: float = 0.0          # -1 hard left .. +1 hard right (DNa02 R-L)
     throttle: float = 0.0       # DNg02 wingbeat amplitude
     panic: float = 0.0          # DNp01 giant fiber; overrides throttle
     dopamine: float = 0.0       # PAM - PPL1, the reinforcement signal
@@ -62,6 +64,40 @@ class MotorOutput:
     punishment: float = 0.0     # PPL1 alone
     spike_rate: float = 0.0     # whole-population mean, for calibration
     regions: dict = field(default_factory=dict)   # per-cluster activation
+
+    @classmethod
+    def average(cls, outputs: "list[MotorOutput]") -> "MotorOutput":
+        """Mean of a frame's ticks, except `panic`, which is a maximum.
+
+        The steering clusters are *one neuron per side* -- DNa02 is a single
+        bilateral pair -- so a single tick's rate can only ever be a multiple
+        of `1/subticks`, i.e. 0.1. Reading one tick per frame therefore
+        quantises `steer` to about three usable levels, and none of them is
+        zero once the resting bias is subtracted. Averaging the frame's ticks
+        samples `subticks * len(outputs)` sub-steps instead and restores the
+        resolution the difference needs.
+
+        `panic` is maxed rather than averaged: a giant-fiber spike anywhere in
+        the frame is an escape, and averaging it away would silently disable
+        the one reflex that is supposed to override everything.
+        """
+        if not outputs:
+            return cls()
+        n = float(len(outputs))
+        regions: dict[str, float] = {}
+        for out in outputs:
+            for name, value in out.regions.items():
+                regions[name] = regions.get(name, 0.0) + value
+        return cls(
+            steer=sum(o.steer for o in outputs) / n,
+            throttle=sum(o.throttle for o in outputs) / n,
+            panic=max(o.panic for o in outputs),
+            dopamine=sum(o.dopamine for o in outputs) / n,
+            reward=sum(o.reward for o in outputs) / n,
+            punishment=sum(o.punishment for o in outputs) / n,
+            spike_rate=sum(o.spike_rate for o in outputs) / n,
+            regions={k: v / n for k, v in regions.items()},
+        )
 
 
 class FlyBangaloreNavigator:
@@ -76,7 +112,7 @@ class FlyBangaloreNavigator:
                  v_reset: float = -0.2, subticks: int = 10,
                  learning_rate: float = 0.01, trace_decay: float = 0.8,
                  sensory_gain: float = 1.0, homeostasis: float = 0.001,
-                 plastic_span: float = 0.5,
+                 plastic_span: float = 0.5, steer_bias: float = 0.0,
                  monoamine_rows: np.ndarray | None = None):
         import torch
 
@@ -95,6 +131,7 @@ class FlyBangaloreNavigator:
         self.trace_decay = trace_decay
         self.homeostasis = homeostasis
         self.plastic_span = plastic_span
+        self.steer_bias = steer_bias
 
         self.neurons = neurons
         self.rows = {name: torch.as_tensor(payload["rows"], dtype=torch.long,
@@ -272,10 +309,25 @@ class FlyBangaloreNavigator:
         panic = rate("panic_dnp01")
         throttle = rate("throttle")
 
+        # Steering is the right-minus-left difference *within* DNa02, which is
+        # the quantity the literature relates to rotational velocity, minus a
+        # calibrated resting bias.
+        #
+        # The bias term is not a fudge. Measured on this connectome, DNa02-left
+        # is silent (0.000 Hz) while DNa02-right runs at ~101 Hz under
+        # information-free drive, and that is not a reconstruction gap -- the
+        # two cells have in-degree 742 and 751, input weight 12,237 and 13,116.
+        # The asymmetry is the recurrent network's own excitation/inhibition
+        # balance. Left raw, `steer` is therefore positive on every tick and
+        # the vehicle can only ever turn right, which is an orbit. Subtracting
+        # the resting value re-centres the readout so the PFL3 drive can push
+        # it either way. `snn.steer_bias` is measured by
+        # `scripts/probe_diagnostics.py`, not guessed -- same discipline as
+        # `snn.gain`.
+        steer = rate("steer_right") - rate("steer_left") - self.steer_bias
+
         return MotorOutput(
-            # Cluster sizes differ (DNa01 has 4 neurons, DNa02 has 2), so the
-            # readout has to be a rate difference, not a spike-count one.
-            steer=rate("steer_r_dna02") - rate("steer_l_dna01"),
+            steer=steer,
             throttle=0.0 if panic > 0.0 else throttle,
             panic=panic,
             dopamine=reward - punishment,
@@ -353,7 +405,7 @@ class FlyBangaloreNavigator:
                    subticks=s.subticks, learning_rate=s.learning_rate,
                    trace_decay=s.trace_decay, sensory_gain=s.sensory_gain,
                    homeostasis=s.homeostasis, plastic_span=s.plastic_span,
-                   monoamine_rows=monoamine)
+                   steer_bias=s.steer_bias, monoamine_rows=monoamine)
 
 
 # --------------------------------------------------------------------------

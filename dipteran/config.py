@@ -5,6 +5,8 @@ Relative paths in the `paths` block resolve against the repo root so scripts
 work from any working directory.
 
 Run `python -m dipteran.config` for a self-check.
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -193,6 +195,50 @@ class Snn(BaseModel):
     homeostasis: float = Field(default=0.001, ge=0.0, lt=1.0)
     # Learned weights stay within +/- this fraction of |anatomical weight|.
     plastic_span: float = Field(default=0.5, gt=0.0)
+
+    # Resting value of rate(DNa02_right) - rate(DNa02_left), subtracted in
+    # `navigator._decode` so the steering readout is zero-centred. Measured,
+    # not chosen: DNa02-left is silent and DNa02-right runs at ~101 Hz under
+    # information-free drive, and both cells are equally well reconstructed
+    # (in-degree 742 vs 751), so the gap is the network's own E/I balance
+    # rather than a data artefact. Left in, `steer` is positive on every tick
+    # and the vehicle can only turn right. Reproduce with
+    # `python scripts/probe_diagnostics.py`.
+    steer_bias: float = 0.191
+
+    # -- reward shaping --------------------------------------------------
+    # Metres of progress that earn a dopamine pulse. Was 100 m, which fired
+    # at most twice in a 25,727-frame route run (total distance closed: 103.6
+    # m), leaving plasticity effectively off for the whole route.
+    progress_threshold_m: float = Field(default=12.0, gt=0.0)
+    # Distance at which a progress reward is worth full strength, and the
+    # distance at which it decays to `reward_far_scale`. The fly should care
+    # more about the last 500 m than about the first kilometre of fifteen.
+    reward_near_m: float = Field(default=500.0, gt=0.0)
+    reward_far_m: float = Field(default=15000.0, gt=0.0)
+    reward_far_scale: float = Field(default=0.02, gt=0.0, le=1.0)
+    # The PAM cells' usable current range. `pam_current_min` is not
+    # `reward_far_scale` expressed as a current: PAM's current -> firing
+    # transfer is superlinear near zero, so a current of 0.02 yields 0.5% of
+    # peak dopamine rather than 2%. 0.05 is where the measured curve actually
+    # delivers 2%.
+    pam_current_min: float = Field(default=0.05, gt=0.0, le=1.0)
+    pam_current_max: float = Field(default=1.0, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _reward_band_is_ordered(self) -> "Snn":
+        if self.reward_near_m >= self.reward_far_m:
+            raise ValueError(
+                f"reward_near_m ({self.reward_near_m}) must sit below "
+                f"reward_far_m ({self.reward_far_m}); the scale runs from full "
+                "strength near the goal down to reward_far_scale far away"
+            )
+        if self.pam_current_min >= self.pam_current_max:
+            raise ValueError(
+                f"pam_current_min ({self.pam_current_min}) must sit below "
+                f"pam_current_max ({self.pam_current_max})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _reset_below_threshold(self) -> "Snn":

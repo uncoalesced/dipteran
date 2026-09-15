@@ -15,6 +15,8 @@ PLAN.md section 11 leaves open for Phase 2:
 So this reports drift and geography, not just "it did not crash".
 
     python scripts/run_route.py --max-minutes 60
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -39,8 +41,8 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
     import torch
 
     from dipteran.connectome import build_adjacency, resolve_clusters
-    from dipteran.navigator import (FlyBangaloreNavigator, classify_state,
-                                    monoamine_rows)
+    from dipteran.navigator import (FlyBangaloreNavigator, MotorOutput,
+                                    classify_state, monoamine_rows)
     from dipteran.world import World
 
     # Connectome first, then SUMO: the build peak and the resident network do
@@ -100,9 +102,10 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
             cost["sense_ms"] += (time.perf_counter() - t) * 1000
 
             t = time.perf_counter()
-            motor = None
-            for _ in range(TICKS_PER_FRAME):
-                motor = navigator.step()
+            # Averaged, not sampled: DNa02 is one neuron per side, so a
+            # single tick quantises `steer` to multiples of 0.1.
+            motor = MotorOutput.average(
+                [navigator.step() for _ in range(TICKS_PER_FRAME)])
             cost["snn_ms"] += (time.perf_counter() - t) * 1000
 
             t = time.perf_counter()

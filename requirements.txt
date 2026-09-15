@@ -31,4 +31,4 @@ pyyaml==6.0.3
 
 # Server + frontend delivery
 fastapi==0.141.1
-uvicorn[standard]==0.52.4  # pulls websockets, which check_phase1.py uses as a client
+uvicorn[standard]==0.52.4  # pulls websockets, which the tests use as a client

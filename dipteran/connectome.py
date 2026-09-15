@@ -12,6 +12,8 @@ the weight from presynaptic neuron j onto postsynaptic neuron i. Rows are
 postsynaptic, columns presynaptic.
 
 Run `python -m dipteran.connectome` to fetch, build, and verify.
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -117,6 +119,16 @@ class Cluster:
     patterns: tuple[str, ...]
     fallbacks: tuple[tuple[str, str], ...] = ()   # (pattern, why)
     note: str = ""
+    # Restrict to one soma hemisphere via the annotation table's `side`
+    # column. Only meaningful for populations that are genuinely bilateral
+    # pairs -- EPG is 26 left / 25 right but its wedges tile the whole ring
+    # across both hemispheres, so splitting it by `side` would mean nothing.
+    side: str | None = None
+    # Restrict matching to specific type columns instead of all of
+    # TYPE_COLUMNS. `^DNa01$` against every column pools two unrelated cell
+    # pairs (see steer_trim_l/steer_trim_r), which is how that cluster ended
+    # up with four neurons instead of two.
+    columns: tuple[str, ...] | None = None
 
 
 CLUSTERS: dict[str, Cluster] = {
@@ -182,14 +194,70 @@ CLUSTERS: dict[str, Cluster] = {
             "site anyway: it is where sound actually enters the brain."
         ),
     ),
-    # -- motor -------------------------------------------------------------
-    "steer_l_dna01": Cluster(
-        "motor", (r"^DNa01$",),
-        note="Descending neuron for left turns.",
+    # -- steering command input --------------------------------------------
+    #
+    # PFL3 is where a goal-relative heading error becomes a turn command. It
+    # is the only site measured to have real authority over the steering
+    # readout: driving side-split DM1/DM4 (PLAN.md's odour channel, and the
+    # site an earlier Phase 3 draft locked) moves DNa02 by 2.2 Hz in the wrong
+    # direction, because six olfactory PNs cannot shift a descending neuron
+    # whose in-degree is 742. Driving PFL3 moves it 40.3 Hz, monotonically.
+    # See `scripts/probe_diagnostics.py` Tests E and F.
+    #
+    # THE PROJECTION IS CONTRALATERAL, and this is measured from W directly,
+    # not assumed: DNa02-left receives 12 synapses from PFL3-right and zero
+    # from PFL3-left; DNa02-right is the mirror. So driving PFL3-LEFT turns
+    # the vehicle RIGHT. That matches Nature 2024's "PFL3R cells are recruited
+    # when the fly is oriented to the left of its goal, and their activity
+    # drives rightward turning" -- the connectome agrees with the paper
+    # without having been told about it. `World.sense()` relies on this
+    # crossing; `tests/test_units.py` asserts the sign.
+    "steer_drive_pfl3_l": Cluster(
+        "sensory", (r"^PFL3$",), side="left",
+        note=("PFL3 left. Projects contralaterally onto DNa02-right, so "
+              "driving this population steers the vehicle RIGHT."),
     ),
-    "steer_r_dna02": Cluster(
-        "motor", (r"^DNa02$",),
-        note="Descending neuron for right turns.",
+    "steer_drive_pfl3_r": Cluster(
+        "sensory", (r"^PFL3$",), side="right",
+        note=("PFL3 right. Projects contralaterally onto DNa02-left, so "
+              "driving this population steers the vehicle LEFT."),
+    ),
+    # -- motor -------------------------------------------------------------
+    #
+    # The steering readout is the right-minus-left difference *within* DNa02,
+    # which is what the literature relates to rotational velocity. The old
+    # `rate(DNa02) - rate(DNa01)` was a category error: two functionally
+    # distinct, largely non-overlapping circuits, each pooled across both
+    # hemispheres. Measured, it returns a near-constant +0.063 at rest with no
+    # directional input at all -- which is exactly the `steer_abs_median`
+    # 0.075 that made Phase 2's vehicle orbit. Its sign is not even structural:
+    # it flips to -0.066 at `min_syn_count=5`.
+    "steer_left": Cluster(
+        "motor", (r"^DNa02$",), side="left",
+        note="DNa02 left. High-gain transient steering; drives left turns.",
+    ),
+    "steer_right": Cluster(
+        "motor", (r"^DNa02$",), side="right",
+        note="DNa02 right. High-gain transient steering; drives right turns.",
+    ),
+    # DNa01 is resolved but deliberately NOT blended into the steering
+    # difference -- it is a separate circuit (low-gain, sustained, tied to
+    # forward velocity) with largely non-overlapping inputs from DNa02, so
+    # combining them reintroduces the same category error one level down.
+    # Held as an optional trim channel.
+    #
+    # Matched on `hemibrain_type` alone, which is the disambiguation: against
+    # all five type columns `^DNa01$` also catches a pair whose `cell_type` is
+    # DNa01 but whose `hemibrain_type` is VES006 -- a different cell entirely.
+    # That collision is why the old cluster held four neurons and the
+    # annotation table's `cell_type` query only ever found two.
+    "steer_trim_l": Cluster(
+        "motor", (r"^DNa01$",), side="left", columns=("hemibrain_type",),
+        note="Genuine DNa01 left (cell_type DNae001). Low-gain trim, unused.",
+    ),
+    "steer_trim_r": Cluster(
+        "motor", (r"^DNa01$",), side="right", columns=("hemibrain_type",),
+        note="Genuine DNa01 right (cell_type DNae001). Low-gain trim, unused.",
     ),
     "panic_dnp01": Cluster(
         "motor", (r"^DNp01$",),
@@ -517,10 +585,29 @@ def resolve_clusters(cfg: Config, neurons: np.ndarray | None = None) -> dict:
         neurons = np.load(cfg.paths.neuron_index)
 
     root_ids = frame["root_id"].fillna("").to_numpy()
-    haystacks = [frame[c].fillna("").to_numpy() for c in type_columns]
+    haystacks = {c: frame[c].fillna("").to_numpy() for c in type_columns}
+    # `side` is what makes a left/right steering readout possible at all. It
+    # is populated cleanly in v783 -- 69,956 left / 69,088 right / 174 center
+    # / 30 na -- but a cluster asking for a hemisphere the table cannot supply
+    # should fail loudly rather than resolve to everything.
+    sides = (frame["side"].fillna("na").to_numpy() if "side" in frame.columns
+             else None)
 
     resolved: dict[str, dict] = {}
     for name, cluster in CLUSTERS.items():
+        if cluster.side and sides is None:
+            raise AssertionError(
+                f"cluster {name!r} asks for side={cluster.side!r} but "
+                f"{cfg.paths.cell_annotations.name} has no `side` column"
+            )
+        columns = cluster.columns or tuple(type_columns)
+        missing = [c for c in columns if c not in haystacks]
+        if missing:
+            raise AssertionError(
+                f"cluster {name!r} restricts matching to {columns}, but "
+                f"{missing} are not in {cfg.paths.cell_annotations.name}"
+            )
+
         attempts = [(p, "", "primary") for p in cluster.patterns]
         attempts += [(p, why, "fallback") for p, why in cluster.fallbacks]
 
@@ -530,11 +617,14 @@ def resolve_clusters(cfg: Config, neurons: np.ndarray | None = None) -> dict:
             tried.append(pattern)
             regex = re.compile(pattern)
             mask = np.zeros(len(frame), dtype=bool)
-            for column in haystacks:
+            for column in columns:
                 mask |= np.fromiter(
-                    (bool(regex.match(str(value))) for value in column),
-                    dtype=bool, count=len(column),
+                    (bool(regex.match(str(value)))
+                     for value in haystacks[column]),
+                    dtype=bool, count=len(frame),
                 )
+            if cluster.side:
+                mask &= sides == cluster.side
             if not mask.any():
                 continue
             matched = np.unique(root_ids[mask])
@@ -549,6 +639,8 @@ def resolve_clusters(cfg: Config, neurons: np.ndarray | None = None) -> dict:
             hit = {
                 "role": cluster.role,
                 "pattern": pattern,
+                "side": cluster.side,
+                "columns": list(columns),
                 "match_kind": kind,
                 "why_fallback": why or None,
                 "annotated": int(len(ids)),
@@ -567,7 +659,8 @@ def resolve_clusters(cfg: Config, neurons: np.ndarray | None = None) -> dict:
             )
         resolved[name] = hit
         flag = "" if hit["match_kind"] == "primary" else "  <-- FALLBACK"
-        print(f"[cells] {name:<16} {hit['pattern']:<24} "
+        side = f" side={cluster.side}" if cluster.side else ""
+        print(f"[cells] {name:<20} {hit['pattern']:<24}{side:<12} "
               f"{len(hit['rows']):>6} rows{flag}", flush=True)
 
     payload = {

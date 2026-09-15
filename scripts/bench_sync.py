@@ -18,6 +18,8 @@ stages in one process get OOM-killed:
     python scripts/bench_sync.py --stage snn      # SNN half only
     python scripts/bench_sync.py --stage sumo     # SUMO half only
     python scripts/bench_sync.py --stage combined # both resident, real cadence
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations

@@ -19,6 +19,8 @@ the way ID narrows the candidate set -- cheaply and without false negatives --
 and geometry then picks the segments that actually overlap.
 
 Run `python -m dipteran.roads` to execute all four steps and verify the join.
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -1017,7 +1019,7 @@ def main() -> None:
     assert connected, "origin and destination are in disconnected components"
     del graph, net
     gc.collect()
-    # See check_phase1.check_sumo_net: duarouter wants ~4.4 GB on this
+    # Measured: duarouter wants ~4.4 GB on this
     # network and will take a small WSL2 guest down with it.
     if os.environ.get("DIPTERAN_DUAROUTER") == "1":
         verify_routable(cfg, endpoints=endpoints)
