@@ -30,7 +30,7 @@ downloaded on first run.
 **1. Python dependencies.**
 
 ```bash
-uv venv --python 3.12 .venv && source .venv/bin/activate
+uv venv --python 3.12 .venv && source .venv\Scripts\activate
 uv pip install -r requirements.txt
 uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 ```
