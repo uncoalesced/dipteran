@@ -26,13 +26,16 @@
        says which of the two clicks it is waiting for. In live mode the
        Release button is also the boot trigger: nothing builds the
        connectome or starts SUMO until POST /route lands. -->
-  <div id="picker" class="absolute top-6 left-1/2 -translate-x-1/2 w-[420px] bg-black/90 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl overflow-hidden z-20">
-    <div class="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
+  <div id="picker" class="absolute top-6 right-6 w-[420px] max-w-[calc(100vw-3rem)] bg-black/90 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl overflow-hidden z-20">
+    <div id="picker-header" class="px-4 py-2 border-b border-neutral-800 flex items-center justify-between cursor-pointer select-none">
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Plot a route</span>
-      <span id="picker-mode" class="text-xs font-mono text-neutral-500">&nbsp;</span>
+      <span class="flex items-center gap-2">
+        <span id="picker-mode" class="text-xs font-mono text-neutral-500">&nbsp;</span>
+        <span id="picker-arrow" class="text-neutral-500 text-[10px] inline-block transition-transform duration-150" style="transform:rotate(90deg)">&#9654;</span>
+      </span>
     </div>
 
-    <div class="px-4 py-3">
+    <div id="picker-body" class="px-4 py-3">
       <div id="picker-step" class="text-lg font-semibold tracking-tight">Click the destination</div>
       <div id="picker-hint" class="text-xs text-neutral-400 mt-0.5">Anywhere inside the road network. This is the odour source the fly will smell its way toward.</div>
 
@@ -68,11 +71,18 @@
        reacting to social-media behaviour, and the captions here are the
        Bangalore traffic states from PLAN.md instead. -->
   <div class="absolute top-6 left-6 w-[360px] bg-black/85 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl overflow-hidden">
-    <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800">
+    <div id="hud-header" class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 cursor-pointer select-none">
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome</span>
-      <span id="badge" class="text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono">MOCK STREAM</span>
+      <span class="flex items-center gap-2">
+        <span id="badge" class="text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono">MOCK STREAM</span>
+        <span id="hud-arrow" class="text-neutral-500 text-[10px] inline-block transition-transform duration-150" style="transform:rotate(90deg)">&#9654;</span>
+      </span>
     </div>
 
+    <!-- Everything below the header collapses as one unit. The canvas has to
+         be inside it: Three.js sizes off clientWidth, and a hidden canvas
+         reports zero, so it is resized on reopen rather than while closed. -->
+    <div id="hud-body">
     <canvas id="brain"></canvas>
     <div id="brain-missing" class="hidden px-4 pb-3 pt-3 text-[11px] font-mono text-neutral-500 leading-relaxed">
       No point cloud. Run <span class="text-neutral-300">python scripts/extract_neuropils.py</span>
@@ -90,6 +100,7 @@
     </div>
 
     <div id="legend" class="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-2"></div>
+    </div>
   </div>
 
   <!-- Telemetry & event log -->
@@ -132,7 +143,8 @@
   </div>
 
   <!-- Provenance watermark. Present but not plastered. -->
-  <div class="absolute bottom-2 left-2 text-[10px] font-mono text-neutral-700 pointer-events-none select-none">Engineered by uncoalesced</div>
+  <div class="absolute bottom-2 left-2 text-[10px] font-mono text-neutral-300 pointer-events-none select-none"
+       style="opacity:.85; text-shadow:0 1px 2px rgba(0,0,0,.9)">Engineered by uncoalesced</div>
 
   <script>
     const BANGALORE_BOUNDS = [[77.40, 12.80], [77.80, 13.15]];
@@ -184,7 +196,7 @@
     // ---------------------------------------------------------------
     const brain = {
       ready: false, regions: [], clusterRegion: {},
-      base: null, colors: null, regionOf: null, geometry: null
+      base: null, colors: null, regionOf: null, geometry: null, resize: null
     };
 
     function initBrain(payload) {
@@ -239,11 +251,14 @@
         renderer.render(scene, camera);
       })();
 
-      window.addEventListener('resize', () => {
+      const resize = () => {
+        if (!canvas.clientWidth) return;        // collapsed; nothing to size
         camera.aspect = canvas.clientWidth / 220;
         camera.updateProjectionMatrix();
         renderer.setSize(canvas.clientWidth, 220, false);
-      });
+      };
+      brain.resize = resize;
+      window.addEventListener('resize', resize);
     }
 
     function buildLegend(regions) {
@@ -303,7 +318,10 @@
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then(payload => { initBrain(payload); buildLegend(payload.regions); })
       .catch(() => {
-        document.getElementById('brain').classList.add('hidden');
+        // Inline, not Tailwind's .hidden: the stylesheet above sets
+        // `#brain { display: block }`, and an ID selector outranks a class,
+        // so .hidden loses and the canvas keeps reserving 220px of nothing.
+        document.getElementById('brain').style.display = 'none';
         document.getElementById('brain-missing').classList.remove('hidden');
       });
 
@@ -480,15 +498,31 @@
     const dopamineValue = document.getElementById('dopamine-value');
     const speedValue = document.getElementById('speed-value');
 
-    const vitalsHeader = document.getElementById('vitals-header');
-    const vitalsDetail = document.getElementById('vitals-detail');
-    const vitalsArrow = document.getElementById('vitals-arrow');
-    let vitalsOpen = false;
-    vitalsHeader.addEventListener('click', () => {
-      vitalsOpen = !vitalsOpen;
-      vitalsDetail.style.display = vitalsOpen ? 'flex' : 'none';
-      vitalsArrow.style.transform = vitalsOpen ? 'rotate(90deg)' : 'rotate(0deg)';
-    });
+    // One arrow per panel, one helper for all of them. `display` is set
+    // inline rather than via Tailwind's `hidden`, because two of these
+    // bodies also carry layout classes (flex-col) that `hidden` would fight.
+    function collapsible(headerId, bodyId, arrowId, open, shown, onOpen) {
+      const header = document.getElementById(headerId);
+      const body = document.getElementById(bodyId);
+      const arrow = document.getElementById(arrowId);
+      const apply = () => {
+        body.style.display = open ? shown : 'none';
+        arrow.style.transform = open ? 'rotate(90deg)' : 'rotate(0deg)';
+      };
+      header.addEventListener('click', () => {
+        open = !open;
+        apply();
+        if (open && onOpen) onOpen();
+      });
+      apply();
+    }
+
+    collapsible('vitals-header', 'vitals-detail', 'vitals-arrow', false, 'flex');
+    collapsible('picker-header', 'picker-body', 'picker-arrow', true, 'block');
+    // The point cloud is sized off clientWidth, which reads 0 while hidden,
+    // so re-measure on reopen rather than trusting the size from init.
+    collapsible('hud-header', 'hud-body', 'hud-arrow', true, 'block',
+                () => brain.resize && brain.resize());
 
     function log(text, tone) {
       const item = document.createElement('div');
