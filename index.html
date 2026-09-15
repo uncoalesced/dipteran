@@ -15,6 +15,21 @@
     #brain { width: 100%; height: 220px; display: block; }
     .meter { height: 3px; border-radius: 2px; background: #26292e; overflow: hidden; }
     .meter > i { display: block; height: 100%; width: 0; transition: width 120ms linear; }
+    /* The three panel collapse arrows. Defined here rather than with
+       Tailwind utilities because an inline transform on a `transition-transform`
+       element computes to the identity matrix under the play CDN -- verified
+       against a bare span, which rotates fine. Rotating via our own class
+       avoids that entirely and keeps size and colour in one place. */
+    .panel-arrow { display: inline-block; font-size: 15px; line-height: 1;
+                   color: #8b8b8b; transform: rotate(0deg);
+                   transition: color 150ms ease; }
+    /* Deliberately NOT transitioned. An animated rotate leaves the computed
+       transform pinned at its start value wherever the animation clock does
+       not tick -- a backgrounded tab, a throttled pane -- and the arrow then
+       points the wrong way for as long as that lasts. The open state has to
+       be reachable without an animation running, so it snaps. */
+    .panel-arrow.open { transform: rotate(90deg); }
+    [class*="cursor-pointer"]:hover .panel-arrow { color: #e5e5e5; }
   </style>
 </head>
 <body class="bg-gray-900 text-white font-sans">
@@ -31,7 +46,7 @@
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Plot a route</span>
       <span class="flex items-center gap-2">
         <span id="picker-mode" class="text-xs font-mono text-neutral-500">&nbsp;</span>
-        <span id="picker-arrow" class="text-neutral-500 text-[10px] inline-block transition-transform duration-150" style="transform:rotate(90deg)">&#9654;</span>
+        <span id="picker-arrow" class="panel-arrow">▸</span>
       </span>
     </div>
 
@@ -75,7 +90,7 @@
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome</span>
       <span class="flex items-center gap-2">
         <span id="badge" class="text-xs bg-red-950 text-red-400 px-2 py-0.5 rounded border border-red-800 font-mono">MOCK STREAM</span>
-        <span id="hud-arrow" class="text-neutral-500 text-[10px] inline-block transition-transform duration-150" style="transform:rotate(90deg)">&#9654;</span>
+        <span id="hud-arrow" class="panel-arrow">▸</span>
       </span>
     </div>
 
@@ -109,7 +124,7 @@
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome Vitals</span>
       <span class="flex items-center gap-2">
         <span id="speed-value" class="text-xs font-mono text-neutral-400 tabular-nums">0.0 m/s</span>
-        <span id="vitals-arrow" class="text-neutral-500 text-[10px] inline-block transition-transform duration-150">▸</span>
+        <span id="vitals-arrow" class="panel-arrow">▸</span>
       </span>
     </div>
 
@@ -173,7 +188,13 @@
              onerror="this.replaceWith(Object.assign(document.createElement('div'),
                {style:'width:14px;height:14px;border-radius:50%;background:#22c55e'}))">
       </div>`;
-    const flyMarker = new maplibregl.Marker({ element: flyEl }).setLngLat([77.6238, 12.9177]).addTo(map);
+    const flyMarker = new maplibregl.Marker({ element: flyEl })
+      .setLngLat([77.6238, 12.9177]).addTo(map);
+    // Hidden until the first telemetry frame puts it somewhere real. The
+    // coordinate above is just a placeholder the Marker constructor needs;
+    // showing it before the fly exists parks a stray dot on Silk Board
+    // regardless of the route the user is in the middle of picking.
+    flyEl.style.visibility = 'hidden';
 
     // Background SUMO traffic as a GeoJSON layer, so hundreds of agents cost
     // one source update per frame rather than hundreds of DOM markers.
@@ -507,7 +528,7 @@
       const arrow = document.getElementById(arrowId);
       const apply = () => {
         body.style.display = open ? shown : 'none';
-        arrow.style.transform = open ? 'rotate(90deg)' : 'rotate(0deg)';
+        arrow.classList.toggle('open', open);
       };
       header.addEventListener('click', () => {
         open = !open;
@@ -556,6 +577,7 @@
       }
 
       flyMarker.setLngLat([data.lon, data.lat]);
+      flyEl.style.visibility = 'visible';
       flyEl.firstElementChild.style.transform = `rotate(${data.heading}deg)`;
 
       // Follow the fly, but not on every frame. Easing at stream rate (20 Hz
