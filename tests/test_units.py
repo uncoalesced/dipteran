@@ -10,6 +10,8 @@ exercised against a synthetic `.net.xml` written to a temp dir, which is the
 point: these have to run on a fresh clone with no data fetched.
 
     python tests/test_units.py
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -38,10 +40,13 @@ from dipteran.roads import (  # noqa: E402
     point_to_polyline_m,
 )
 from dipteran.world import (  # noqa: E402
+    SENSORY_CEILING,
     bearing_deg,
     haversine_m,
     is_pothole,
     looming_rate,
+    proximity_scale,
+    steering_drive,
     wrap180,
 )
 
@@ -702,6 +707,295 @@ def test_plastic_bounds_survive_inhibitory_weights():
 # --------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Phase 3: the signed steering drive, and reward shaping
+# --------------------------------------------------------------------------
+
+def test_steering_drive_sign_goal_to_the_right():
+    """Goal to the right must drive PFL3-LEFT. The crossing is the point.
+
+    This exact formula shipped backwards twice during design review -- once
+    with a worked example that contradicted its own arithmetic -- so the sign
+    is asserted rather than inspected.
+
+    `error = bearing_to_goal - heading`, positive means the goal is clockwise
+    of the nose, i.e. to the right. PFL3 projects *contralaterally* onto
+    DNa02 (measured: 12 synapses PFL3-right -> DNa02-left, zero
+    PFL3-right -> DNa02-right), so raising DNa02-right -- which is what
+    `steer = right - left` needs for a positive, rightward steer -- requires
+    driving PFL3-left.
+    """
+    # cos(90 degrees) is 6.1e-17 rather than 0 in binary floating point, so
+    # the off lobe is asserted against a tolerance. The sign is what matters
+    # and it is exact: one lobe at full drive, the other at zero.
+    left, right = steering_drive(45.0)
+    assert math.isclose(left, 1.0, rel_tol=1e-9), left
+    assert math.isclose(right, 0.0, abs_tol=1e-12), right
+    # ... and the mirror, so a sign flip in one lobe alone cannot pass.
+    left, right = steering_drive(-45.0)
+    assert math.isclose(left, 0.0, abs_tol=1e-12), left
+    assert math.isclose(right, 1.0, rel_tol=1e-9), right
+
+
+def test_steering_drive_is_balanced_dead_ahead():
+    """Facing the goal produces equal lobes and therefore no net turn."""
+    left, right = steering_drive(0.0)
+    assert math.isclose(left, right), (left, right)
+    assert math.isclose(left, math.cos(math.radians(45.0)), rel_tol=1e-9)
+
+
+def test_steering_drive_is_antisymmetric():
+    """Swapping the sign of the error swaps the two lobes, at every angle."""
+    for error in range(-180, 181, 5):
+        left, right = steering_drive(float(error))
+        mirror_left, mirror_right = steering_drive(float(-error))
+        assert math.isclose(left, mirror_right, abs_tol=1e-12), error
+        assert math.isclose(right, mirror_left, abs_tol=1e-12), error
+
+
+def test_steering_drive_dead_zone_behind():
+    """Both lobes clamp to zero past +/-135 degrees, and nothing goes negative.
+
+    Documented consequence of two cosine lobes at +/-45: a goal directly
+    behind the fly produces no steering drive at all. `max(0, ...)` is what
+    keeps the dead zone a *zero* rather than a negative current, which would
+    otherwise be injected as though it were a stimulus.
+    """
+    for error in (136.0, 150.0, 180.0, -180.0, -150.0, -136.0):
+        left, right = steering_drive(error)
+        assert left == 0.0 and right == 0.0, (error, left, right)
+    for error in range(-180, 181):
+        left, right = steering_drive(float(error))
+        assert left >= 0.0 and right >= 0.0, error
+
+
+def test_steering_drive_scaled_stays_below_threshold():
+    """The injected value never reaches v_thresh, at any heading error.
+
+    A lobe peaks at exactly 1.0, and `calibrate_gain`'s docstring is explicit
+    that a sensory current at threshold makes those rows fire every sub-tick
+    -- "not a stimulus, it is a short circuit".
+    """
+    assert 0.0 < SENSORY_CEILING < 1.0, SENSORY_CEILING
+    for error in range(-180, 181):
+        left, right = steering_drive(float(error))
+        assert 0.0 <= left * SENSORY_CEILING <= SENSORY_CEILING, error
+        assert 0.0 <= right * SENSORY_CEILING <= SENSORY_CEILING, error
+
+
+def test_steering_scaling_preserves_contrast():
+    """Scaling must not flatten the channel the way clipping does.
+
+    `min(SENSORY_CEILING, lobe)` is the obvious way to respect the ceiling and
+    it silently destroys half the steering range: dead ahead the lobes are
+    0.707/0.707 and both clip to 0.4, while a goal hard right is 1.0/0.0 and
+    clips to 0.4/0.0 -- so the left lobe reads exactly 0.4 in both cases and
+    can no longer distinguish them. This asserts the injected contrast really
+    does change between those two headings.
+    """
+    ahead = [v * SENSORY_CEILING for v in steering_drive(0.0)]
+    hard_right = [v * SENSORY_CEILING for v in steering_drive(45.0)]
+    assert ahead[0] != hard_right[0], (ahead, hard_right)
+    assert math.isclose(ahead[0] - ahead[1], 0.0, abs_tol=1e-12)
+    assert hard_right[0] - hard_right[1] > 0.3, hard_right
+
+    clipped_ahead = min(SENSORY_CEILING, steering_drive(0.0)[0])
+    clipped_right = min(SENSORY_CEILING, steering_drive(45.0)[0])
+    assert clipped_ahead == clipped_right, (
+        "if this ever differs, clipping became safe and this test is stale")
+
+
+def test_proximity_scale_hits_both_anchors():
+    """500 m -> 100%, 15 km -> 2%. The two numbers actually asked for."""
+    assert math.isclose(proximity_scale(500.0), 1.0, rel_tol=1e-9)
+    assert math.isclose(proximity_scale(15000.0), 0.02, rel_tol=1e-6)
+
+
+def test_proximity_scale_clamps_outside_the_anchors():
+    """Arriving earns no more than 100%, and 40 km earns no less than 2%."""
+    for near in (0.0, 1.0, 100.0, 499.0):
+        assert proximity_scale(near) == 1.0, near
+    for far in (15001.0, 40000.0, 1e9):
+        assert proximity_scale(far) == 0.02, far
+
+
+def test_proximity_scale_is_monotonic():
+    """Closer is always worth at least as much -- never a local dip."""
+    previous = 0.0
+    for distance in range(20000, 0, -250):
+        value = proximity_scale(float(distance))
+        assert value >= previous - 1e-12, distance
+        previous = value
+
+
+def test_proximity_scale_is_well_below_full_at_route_start():
+    """The 10.6 km start of the real route must not read as 'nearly arrived'.
+
+    Guards the failure this scaling exists to prevent: a curve flat enough to
+    pay out near-full dopamine at the start teaches nothing about approaching
+    the goal.
+    """
+    at_start = proximity_scale(10587.5)      # cache/route_run.json
+    assert 0.02 < at_start < 0.10, at_start
+    assert at_start < proximity_scale(2000.0) < proximity_scale(600.0)
+
+
+def _toy_navigator():
+    """A 6-neuron navigator, so the loop's logic is testable without the corpus.
+
+    Same spirit as the synthetic `.net.xml` the SUMO cases use: these tests
+    have to run on a fresh clone with nothing downloaded, and the behaviour
+    under test -- what `reset` clears, how a frame's ticks combine -- does not
+    depend on having 139k real neurons.
+    """
+    import numpy as _np
+    import torch
+
+    from dipteran.navigator import FlyBangaloreNavigator
+
+    n = 6
+    dense = torch.zeros((n, n))
+    for i in range(n):
+        dense[i, (i + 1) % n] = 3.0
+        dense[i, (i + 2) % n] = -1.0
+    w = dense.to_sparse_csr()
+    neurons = _np.arange(n, dtype=_np.int64)
+    clusters = {"clusters": {
+        "sense_a": {"role": "sensory", "rows": [0, 1]},
+        "steer_left": {"role": "motor", "rows": [2]},
+        "steer_right": {"role": "motor", "rows": [3]},
+        "throttle": {"role": "motor", "rows": [4]},
+    }}
+    return FlyBangaloreNavigator(w, neurons, clusters, gain=4.0,
+                                 learning_rate=0.1, steer_bias=0.0)
+
+
+def test_reset_clears_state_but_keeps_learned_weights():
+    """`reset()` must not touch `p_val`. It is the only thing episodes carry.
+
+    `World.reset_episode` calls this between attempts at the route. Membrane
+    voltage, spikes and the eligibility trace are all within-episode state and
+    have to go. The plastic overlay is the entire point of running more than
+    one episode, so zeroing it would silently make training a no-op -- and it
+    would look like "learning just doesn't work" rather than like a bug.
+    """
+    nav = _toy_navigator()
+    nav.set_sensory({"sense_a": 0.9})
+    for _ in range(5):
+        nav.step()
+    nav._reinforce(1.0)          # move p_val away from the anatomy
+
+    drifted = nav.p_val.clone()
+    assert not bool((drifted == nav.p_val0).all()), "test needs p_val to move"
+
+    nav.reset()
+    assert float(nav.v.abs().sum()) == 0.0
+    assert float(nav.spikes.abs().sum()) == 0.0
+    assert float(nav.trace.abs().sum()) == 0.0
+    assert bool((nav.p_val == drifted).all()), "reset() clobbered learning"
+
+
+def test_motor_output_average_recovers_resolution():
+    """Averaging a frame's ticks is what makes a 1-neuron readout usable.
+
+    DNa02 is a single bilateral pair, so one tick's rate quantises to
+    multiples of 1/subticks = 0.1. Subtract a resting bias of 0.191 and no
+    reachable value is near zero -- the vehicle cannot hold a straight line.
+    Averaging the frame's ticks samples subticks*ticks sub-steps instead.
+    """
+    from dipteran.navigator import MotorOutput
+
+    ticks = [MotorOutput(steer=s, throttle=0.5, dopamine=0.2)
+             for s in (0.1, 0.0, 0.1, 0.0, 0.1)]
+    averaged = MotorOutput.average(ticks)
+    assert math.isclose(averaged.steer, 0.06), averaged.steer
+    assert averaged.steer not in {t.steer for t in ticks}, (
+        "averaging must reach values no single tick can express")
+    assert math.isclose(averaged.throttle, 0.5)
+
+
+def test_motor_output_average_keeps_panic_as_a_maximum():
+    """One giant-fiber spike in a frame is an escape, not a fifth of one."""
+    from dipteran.navigator import MotorOutput
+
+    ticks = [MotorOutput(panic=0.0) for _ in range(4)] + [MotorOutput(panic=0.8)]
+    assert MotorOutput.average(ticks).panic == 0.8
+    assert MotorOutput.average([]).panic == 0.0
+
+
+# --------------------------------------------------------------------------
+# the route picker
+#
+# index.html's entry flow is two map clicks and a button, and the button is
+# a POST /route. These cover the parts of it that can go quietly wrong: a
+# point outside the OSM extract has no road to snap to and must be refused
+# before SUMO is asked to spawn a vehicle there, and the mock streamer has
+# to honour the picked pair or the picker looks broken to anyone trying it
+# without the live backend.
+# --------------------------------------------------------------------------
+
+def test_route_rejects_a_point_outside_the_extract():
+    from fastapi import HTTPException
+
+    import main as server
+
+    r = server._route_config()
+    outside = server.Endpoint(lat=r.bbox.north + 1.0, lon=r.origin.lon)
+    inside = server.Endpoint(lat=r.destination.lat, lon=r.destination.lon)
+
+    for bad in (server.RouteRequest(origin=outside, destination=inside),
+                server.RouteRequest(origin=inside, destination=outside)):
+        try:
+            server.post_route(bad)
+        except HTTPException as exc:
+            assert exc.status_code == 422, exc.status_code
+        else:
+            raise AssertionError("a point outside route.bbox was accepted")
+
+
+def test_route_accepts_the_configured_default():
+    import main as server
+
+    r = server._route_config()
+    server.SIM.started = False                  # mock mode never sets it
+    reply = server.post_route(server.RouteRequest(
+        origin=server.Endpoint(lat=r.origin.lat, lon=r.origin.lon),
+        destination=server.Endpoint(lat=r.destination.lat,
+                                    lon=r.destination.lon)))
+    assert reply["ok"] is True
+    assert server.SIM.origin == (r.origin.lat, r.origin.lon)
+    assert server.SIM.goal == (r.destination.lat, r.destination.lon)
+
+
+def test_mock_stream_starts_where_the_user_pointed():
+    """And faces the goal, so the first frame already reads as a departure."""
+    import main as server
+    from dipteran.world import bearing_deg, wrap180
+
+    origin, goal = (12.95, 77.60), (13.00, 77.66)
+    frame = next(server.mock_frames(origin, goal))
+
+    # One 20 Hz step of drift has already been applied, so this is "near",
+    # not "equal" -- the point is that it is not Silk Board.
+    assert abs(frame["lat"] - origin[0]) < 1e-3, frame["lat"]
+    assert abs(frame["lon"] - origin[1]) < 1e-3, frame["lon"]
+    assert abs(wrap180(frame["heading"] - bearing_deg(*origin, *goal))) < 20.0
+
+
+def test_world_takes_an_origin_and_goal_override():
+    """The picker's pair has to reach World without going through config."""
+    import inspect
+
+    from dipteran.world import World
+
+    params = inspect.signature(World.__init__).parameters
+    for name in ("origin", "goal"):
+        assert name in params, f"World.__init__ lost its {name} override"
+        assert params[name].default is None, (
+            f"World.__init__ {name} must default to None so config.yaml "
+            f"stays the fallback")
+
 
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())

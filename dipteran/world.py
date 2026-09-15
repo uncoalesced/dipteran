@@ -22,6 +22,8 @@ simulates it, so background traffic reacts to a fly drifting into their lane.
 It also sidesteps the stranding risk in PLAN.md section 11 -- with 239
 strongly-connected components a route-constrained vehicle can end up in a dead
 component, but a free body only ever needs to be near *some* road.
+
+Engineered by uncoalesced.
 """
 
 from __future__ import annotations
@@ -59,6 +61,14 @@ EGO_ROUTE = "fly_route"
 LOOM_FIELD_DEG = 60.0        # forward half-field the looming detectors watch
 HORN_RADIUS_M = 15.0
 VEHICLE_WIDTH_M = 1.8
+
+# Ceiling on any single injected sensory current. `calibrate_gain` was run at
+# drive=0.4 and its docstring explains why the value is deliberately below
+# `v_thresh`: at threshold a clamped row fires every sub-tick, which is a
+# short circuit rather than a stimulus. Every channel here is individually
+# bounded to [0, 1] already, so this only bites on the steering lobes, which
+# do reach 1.0 by construction.
+SENSORY_CEILING = 0.4
 
 
 # --------------------------------------------------------------------------
@@ -107,6 +117,60 @@ def looming_rate(prev_dist: float, dist: float, dt: float,
     return max(0.0, (theta_now - theta_prev) / dt)
 
 
+def steering_drive(error_deg: float, half_angle_deg: float = 45.0
+                   ) -> tuple[float, float]:
+    """Signed heading error -> (PFL3-left drive, PFL3-right drive).
+
+    `error` is `bearing_to_goal - heading`, so a positive error means the goal
+    lies clockwise of where the fly is pointing -- to its RIGHT -- and
+    `World.apply` increases heading for positive `steer`, so positive steer
+    turns right. The existing `compass_epg` current, `max(0, cos(error))`, is
+    even in `error` and so cannot express any of this: a goal 90 degrees left
+    and one 90 degrees right produce the identical scalar. It says how aligned
+    the fly is, never which way to fix it, which is why nothing in Phase 2 ever
+    corrected a heading.
+
+    Two overlapping cosine lobes offset by +/- `half_angle_deg` restore the
+    sign, the way a pair of antennae or a pair of PFL3 populations do.
+
+    THE RETURN IS CROSSED, and that is not a typo. PFL3 projects
+    contralaterally onto DNa02 -- measured directly from W, 12 synapses from
+    PFL3-right onto DNa02-left and zero onto DNa02-right, mirrored on the
+    other side. So a goal to the RIGHT must drive PFL3-LEFT in order to raise
+    DNa02-right and turn right. This matches Nature 2024's PFL3R/PFL3L
+    asymmetry. `tests/test_units.py` asserts the sign rather than trusting it:
+    an earlier draft of this formula shipped with its worked example
+    contradicting its own arithmetic, twice.
+
+        error = +45 (goal to the right) -> left lobe 1.0, right lobe 0.0
+        error =   0 (dead ahead)        -> both 0.707, no net turn
+        error = 180 (behind)            -> both 0.0, the dead zone
+    """
+    right_of_nose = max(0.0, math.cos(math.radians(error_deg - half_angle_deg)))
+    left_of_nose = max(0.0, math.cos(math.radians(error_deg + half_angle_deg)))
+    # goal on the right -> drive PFL3-left; goal on the left -> PFL3-right.
+    return right_of_nose, left_of_nose
+
+
+def proximity_scale(distance_m: float, near_m: float = 500.0,
+                    far_m: float = 15000.0, far_scale: float = 0.02) -> float:
+    """How much a unit of progress is worth, by remaining distance.
+
+    Full strength within `near_m` of the goal, falling to `far_scale` at
+    `far_m` and held there beyond it. Inverse-power through both anchors --
+    the same shape as `sense()`'s odour law, which already uses a 500 m
+    constant.
+
+    This scales the *magnitude* of a progress reward; it never pays out for
+    mere proximity. `rewards()` still gates on having actually closed
+    distance, so a fly parked near the goal earns nothing, which is the
+    contract `rewards()` has always had.
+    """
+    exponent = math.log(far_scale) / math.log(near_m / far_m)
+    return max(far_scale,
+               min(1.0, (near_m / max(distance_m, 1.0)) ** exponent))
+
+
 def is_pothole(edge_id: str, density: float = 0.04) -> bool:
     """Synthetic hazard, deterministic per edge.
 
@@ -152,7 +216,9 @@ class World:
 
     def __init__(self, cfg, *, port: int = 8813, background: int = 300,
                  pothole_density: float | None = None,
-                 step_length: float | None = None, seed: int = 20260914):
+                 step_length: float | None = None, seed: int = 20260914,
+                 origin: tuple[float, float] | None = None,
+                 goal: tuple[float, float] | None = None):
         import traci
 
         self.cfg = cfg
@@ -163,8 +229,13 @@ class World:
                                 if pothole_density is None else pothole_density)
         self.seed = seed
 
-        self.origin = (cfg.route.origin.lat, cfg.route.origin.lon)
-        self.goal = (cfg.route.destination.lat, cfg.route.destination.lon)
+        # config.yaml holds the default route; the UI's pick-on-map flow
+        # passes its own pair instead. Both are validated against route.bbox
+        # by the caller -- outside the extract there is simply no road network
+        # to snap to, and `_spawn_ego` would raise on an unresolvable origin.
+        self.origin = origin or (cfg.route.origin.lat, cfg.route.origin.lon)
+        self.goal = goal or (cfg.route.destination.lat,
+                             cfg.route.destination.lon)
 
         self.proc = self._launch(port)
         self.state = VehicleState(lat=self.origin[0], lon=self.origin[1])
@@ -306,9 +377,14 @@ class World:
         # infinity on arrival.
         odour = min(1.0, 500.0 / max(s.distance_to_goal_m, 1.0))
 
-        # Sun compass: EPG drive peaks when the fly faces the goal.
+        # Sun compass: EPG drive peaks when the fly faces the goal. Kept
+        # unchanged -- it is a real alignment signal and Phase 2 validated the
+        # behaviour built on it -- but it is even in `error` and so carries no
+        # turn direction at all. The signed half of the compass is the PFL3
+        # pair below; this scalar stays as the "how aligned am I" channel.
         error = wrap180(bearing_deg(s.lat, s.lon, *self.goal) - s.heading)
         compass = max(0.0, math.cos(math.radians(error)))
+        pfl3_left, pfl3_right = steering_drive(error)
 
         # Optic flow: what the fly is *actually* achieving, not what it asked
         # for. Zero flow with the throttle open is the gridlock signal.
@@ -328,6 +404,23 @@ class World:
             "odor_dm1": odour,
             "odor_dm4": odour * 0.6,
             "compass_epg": compass,
+            # The signed steering command, scaled into the calibrated input
+            # range. SENSORY_CEILING exists because `calibrate_gain`'s
+            # docstring is explicit that a sensory current at `v_thresh` makes
+            # those rows fire every sub-tick -- "not a stimulus, it is a short
+            # circuit" -- and the sweep that produced `snn.gain` was run at a
+            # drive of 0.4. A lobe peaks at exactly 1.0, so the raw value
+            # cannot be injected as-is.
+            #
+            # Scaled, not clipped, and the difference is the whole signal.
+            # `min(0.4, lobe)` looks equivalent and destroys the channel: dead
+            # ahead the lobes are 0.707/0.707 and both clip to 0.4/0.4, while
+            # a goal hard right gives 1.0/0.0 which clips to 0.4/0.0 -- the
+            # left lobe reads 0.4 in both cases, so half the steering range
+            # collapses to a constant. Multiplying keeps the ratio intact:
+            # 0.283/0.283 dead ahead, 0.4/0.0 hard right.
+            "steer_drive_pfl3_l": pfl3_left * SENSORY_CEILING,
+            "steer_drive_pfl3_r": pfl3_right * SENSORY_CEILING,
             "optic_flow_t4": flow,
             # A jam reads as *absent* flow, so this drive is the shortfall:
             # still air on a fly that is trying to move is what panics it.
@@ -473,17 +566,50 @@ class World:
     def rewards(self) -> tuple[float, float]:
         """(PAM current, PPL1 current), per PLAN.md section 4.
 
-        Reward is progress, not proximity -- a fly parked 100 m from the goal
-        should not be rewarded forever for standing still. Punishment is the
-        sustained stall, the pothole, and wandering off the network.
+        Reward is still *progress*, not proximity -- a fly parked 100 m from
+        the goal is not rewarded forever for standing still, because the gate
+        is having closed distance since the last best. What proximity now
+        changes is how much a unit of progress is worth: the closer the goal,
+        the larger the dopamine, `proximity_scale` above.
+
+        The progress threshold moved from 100 m to `snn.progress_threshold_m`
+        (12 m). At 100 m the channel fired at most twice in a 25,727-frame run
+        -- `closed_m` for that entire run was 103.6 m -- so `_reinforce` ran
+        homeostasis-only for essentially the whole route and no learning could
+        occur. At the measured median speed of 3.82 m/s, 12 m is about three
+        seconds of clean running.
+
+        Punishment is the sustained stall, the pothole, and wandering off the
+        network, unchanged.
         """
         s = self.state
+        r = self.cfg.snn
         pam = 0.0
-        if s.distance_to_goal_m < self.best_distance_m - 100.0:
+        if s.distance_to_goal_m < self.best_distance_m - r.progress_threshold_m:
             self.best_distance_m = s.distance_to_goal_m
             pam = 1.0
         elif s.speed > 8.33:                       # sustained clean cruising
             pam = 0.3
+
+        if pam:
+            # Scale by how close the goal is, then map onto the PAM cells'
+            # measured dynamic range.
+            #
+            # Both halves matter. The scale is what makes arriving worth more
+            # than setting off -- full strength inside `reward_near_m`, two
+            # percent at `reward_far_m`. The mapping is what makes that
+            # scaling survive contact with the neurons: PAM's current ->
+            # firing response is superlinear at the bottom (measured, see
+            # `scripts/probe_diagnostics.py` Test D), so injecting the raw
+            # fraction as a current delivers 0.5% of peak dopamine where 2%
+            # was asked for. `pam_current_min` is read off that curve as the
+            # current that actually produces `reward_far_scale` of the
+            # dopamine `pam_current_max` produces.
+            scale = proximity_scale(s.distance_to_goal_m, r.reward_near_m,
+                                    r.reward_far_m, r.reward_far_scale)
+            span = (scale - r.reward_far_scale) / (1.0 - r.reward_far_scale)
+            pam *= r.pam_current_min + span * (r.pam_current_max
+                                               - r.pam_current_min)
 
         ppl1 = 0.0
         if s.stalled_s > 45.0:
@@ -496,3 +622,51 @@ class World:
 
     def step_sumo(self) -> None:
         self.traci.simulationStep()
+
+    # -- episodes --------------------------------------------------------
+
+    def reset_episode(self, navigator=None) -> None:
+        """Teleport back to the origin for another attempt, in-process.
+
+        Episodic training needs many runs at the same route, and the obvious
+        way to get them -- restart the process -- costs 75-130 s of SUMO
+        network parse plus ~28 s of connectome build every time. Nothing about
+        the road network changes between episodes, so nothing needs rebuilding:
+        `moveToXY` puts the vehicle back and the simulation carries on with its
+        background traffic still running.
+
+        `navigator.reset()` clears membrane voltages, spikes and the
+        eligibility trace. It deliberately does NOT touch `p_val`, the plastic
+        overlay -- that is the only thing the fly carries between episodes, and
+        zeroing it would throw away the entire point of running more than one.
+        """
+        s = self.state
+        s.lat, s.lon = self.origin
+        s.heading = bearing_deg(*self.origin, *self.goal)
+        s.speed = 0.0
+        s.throttle_cmd = 0.0
+        s.travelled_m = 0.0
+        s.stalled_s = 0.0
+        s.off_road_m = 0.0
+        s.nearby = []
+        s.distance_to_goal_m = haversine_m(*self.origin, *self.goal)
+        # Reset the ratchet too: `best_distance_m` is monotonic within an
+        # episode, so carrying it across would mean the next run starts
+        # already "past" its own progress and can never earn reward again.
+        self.best_distance_m = s.distance_to_goal_m
+        self._prev_dist = {}
+
+        try:
+            x, y = self.traci.simulation.convertGeo(s.lon, s.lat, fromGeo=True)
+            self._ego_xy = (x, y)
+            self.traci.vehicle.moveToXY(EGO_ID, "", -1, x, y,
+                                        angle=s.heading, keepRoute=2)
+            self.traci.vehicle.setSpeed(EGO_ID, 0.0)
+        except Exception:
+            pass
+
+        edge, _pos, _lane = self._edge_at(s.lat, s.lon)
+        s.edge = edge
+
+        if navigator is not None:
+            navigator.reset()

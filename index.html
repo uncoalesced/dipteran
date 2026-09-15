@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Drosophila Bangalore Purgatory</title>
+  <!-- Dipteran. Engineered by uncoalesced. -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
@@ -18,6 +19,48 @@
 </head>
 <body class="bg-gray-900 text-white font-sans">
   <div id="map"></div>
+
+  <!-- Route picker. The whole entry flow: pick where the fly is going,
+       pick where it starts, release it. It sits over the map rather than
+       beside it because picking *is* a map interaction -- the panel only
+       says which of the two clicks it is waiting for. In live mode the
+       Release button is also the boot trigger: nothing builds the
+       connectome or starts SUMO until POST /route lands. -->
+  <div id="picker" class="absolute top-6 left-1/2 -translate-x-1/2 w-[420px] bg-black/90 backdrop-blur-md border border-neutral-800 rounded-xl shadow-2xl overflow-hidden z-20">
+    <div class="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
+      <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Plot a route</span>
+      <span id="picker-mode" class="text-xs font-mono text-neutral-500">&nbsp;</span>
+    </div>
+
+    <div class="px-4 py-3">
+      <div id="picker-step" class="text-lg font-semibold tracking-tight">Click the destination</div>
+      <div id="picker-hint" class="text-xs text-neutral-400 mt-0.5">Anywhere inside the road network. This is the odour source the fly will smell its way toward.</div>
+
+      <div class="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs font-mono items-center">
+        <span class="text-amber-400">Destination</span>
+        <span id="pick-dest" class="text-neutral-500 tabular-nums truncate">not set</span>
+        <span class="text-emerald-400">Start</span>
+        <span id="pick-origin" class="text-neutral-500 tabular-nums truncate">not set</span>
+      </div>
+
+      <div id="picker-error" class="hidden mt-2 text-xs font-mono text-red-400"></div>
+
+      <div class="mt-3 flex items-center gap-2">
+        <button id="picker-go" disabled
+          class="flex-1 text-sm font-semibold px-3 py-2 rounded-lg bg-emerald-600 text-black disabled:bg-neutral-800 disabled:text-neutral-600 transition-colors">
+          Release the fly
+        </button>
+        <button id="picker-default"
+          class="text-xs font-mono px-3 py-2 rounded-lg border border-neutral-700 text-neutral-400 hover:text-neutral-100 hover:border-neutral-500 transition-colors">
+          Use default
+        </button>
+        <button id="picker-reset"
+          class="text-xs font-mono px-3 py-2 rounded-lg border border-neutral-800 text-neutral-500 hover:text-neutral-200 transition-colors">
+          Clear
+        </button>
+      </div>
+    </div>
+  </div>
 
   <!-- Neural activity HUD. Layout follows the reference screenshots: point
        cloud, state banner, per-region legend with meters. Nothing else about
@@ -51,33 +94,45 @@
 
   <!-- Telemetry & event log -->
   <div class="absolute bottom-6 right-6 w-96 bg-black/85 backdrop-blur-md border border-neutral-800 rounded-xl p-4 shadow-2xl flex flex-col gap-3 pointer-events-auto">
-    <div class="flex items-center justify-between border-b border-neutral-800 pb-2">
+    <div id="vitals-header" class="flex items-center justify-between border-b border-neutral-800 pb-2 cursor-pointer select-none">
       <span class="text-xs font-mono tracking-widest text-emerald-400 uppercase">Connectome Vitals</span>
-      <span id="speed-value" class="text-xs font-mono text-neutral-400 tabular-nums">0.0 m/s</span>
+      <span class="flex items-center gap-2">
+        <span id="speed-value" class="text-xs font-mono text-neutral-400 tabular-nums">0.0 m/s</span>
+        <span id="vitals-arrow" class="text-neutral-500 text-[10px] inline-block transition-transform duration-150">▸</span>
+      </span>
     </div>
 
-    <div class="grid grid-cols-2 gap-2 text-xs font-mono">
-      <div>
-        <span class="text-neutral-400">PPL1 (Pain):</span>
-        <div class="w-full bg-neutral-800 h-2 rounded overflow-hidden mt-1">
-          <div id="bar-pain" class="bg-red-500 h-full w-0 transition-all duration-100"></div>
+    <!-- Collapsed by default -- only the header + speed readout show until
+         the arrow is clicked. Shown/hidden via inline style, not Tailwind's
+         `hidden` utility, so there's no ambiguity with the `flex-col` layout
+         classes also on this element (see the click handler below). -->
+    <div id="vitals-detail" class="flex-col gap-3" style="display:none">
+      <div class="grid grid-cols-2 gap-2 text-xs font-mono">
+        <div>
+          <span class="text-neutral-400">PPL1 (Pain):</span>
+          <div class="w-full bg-neutral-800 h-2 rounded overflow-hidden mt-1">
+            <div id="bar-pain" class="bg-red-500 h-full w-0 transition-all duration-100"></div>
+          </div>
+        </div>
+        <div>
+          <span class="text-neutral-400">DNp01 (Panic):</span>
+          <div class="w-full bg-neutral-800 h-2 rounded overflow-hidden mt-1">
+            <div id="bar-panic" class="bg-amber-500 h-full w-0 transition-all duration-100"></div>
+          </div>
         </div>
       </div>
-      <div>
-        <span class="text-neutral-400">DNp01 (Panic):</span>
-        <div class="w-full bg-neutral-800 h-2 rounded overflow-hidden mt-1">
-          <div id="bar-panic" class="bg-amber-500 h-full w-0 transition-all duration-100"></div>
-        </div>
-      </div>
-    </div>
 
-    <div class="mt-1">
-      <span class="text-[10px] uppercase font-mono tracking-wider text-neutral-500">Neural Event Log</span>
-      <div id="terminal" class="h-28 overflow-y-auto font-mono text-[11px] text-neutral-300 flex flex-col-reverse gap-1 mt-1 bg-black/50 p-2 rounded border border-neutral-900">
-        <div class="text-neutral-600">&gt; Initializing Central Complex compass...</div>
+      <div class="mt-1">
+        <span class="text-[10px] uppercase font-mono tracking-wider text-neutral-500">Neural Event Log</span>
+        <div id="terminal" class="h-28 overflow-y-auto font-mono text-[11px] text-neutral-300 flex flex-col-reverse gap-1 mt-1 bg-black/50 p-2 rounded border border-neutral-900">
+          <div class="text-neutral-600">&gt; Initializing Central Complex compass...</div>
+        </div>
       </div>
     </div>
   </div>
+
+  <!-- Provenance watermark. Present but not plastered. -->
+  <div class="absolute bottom-2 left-2 text-[10px] font-mono text-neutral-700 pointer-events-none select-none">Engineered by uncoalesced</div>
 
   <script>
     const BANGALORE_BOUNDS = [[77.40, 12.80], [77.80, 13.15]];
@@ -93,11 +148,18 @@
     const flyEl = document.createElement('div');
     flyEl.innerHTML = `
       <div style="transform-origin: center; transition: transform 0.05s linear;">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5">
-          <circle cx="12" cy="12" r="5" fill="#22c55e"/>
-          <line x1="12" y1="2" x2="12" y2="7" />
-          <line x1="7" y1="7" x2="17" y2="17" stroke-dasharray="2 2"/>
-        </svg>
+        <!-- Rendered dorsally from TuragaLab/flybody's MuJoCo body model
+             (Apache-2.0, see DATA_LICENSE.md) by scripts/render_fly_sprite.py.
+             The sprite is head-up and the payload's heading is degrees
+             clockwise from north, so the rotate() below needs no offset. The
+             green dot it replaced is the fallback if the asset was never
+             rendered. Keep backticks out of this comment: it sits inside a
+             template literal, and a stray one closes the string mid-sentence
+             and takes the whole script block down with it. -->
+        <img src="/fly-dorsal.png" width="34" height="34" alt="fly"
+             style="display:block; filter: drop-shadow(0 0 3px rgba(0,0,0,.65));"
+             onerror="this.replaceWith(Object.assign(document.createElement('div'),
+               {style:'width:14px;height:14px;border-radius:50%;background:#22c55e'}))">
       </div>`;
     const flyMarker = new maplibregl.Marker({ element: flyEl }).setLngLat([77.6238, 12.9177]).addTo(map);
 
@@ -246,12 +308,169 @@
       });
 
     // ---------------------------------------------------------------
+    // Route picker
+    //
+    // Two clicks and a button. Destination first, deliberately: the fly
+    // navigates by an odour gradient toward the goal, so the goal is the
+    // thing that defines the run -- where it happens to start is the lesser
+    // of the two choices. The picked pair is validated against the same
+    // bbox the backend validates against (fetched, not duplicated here) so
+    // a click outside the road network is refused with an explanation
+    // instead of a 422 after the fact.
+    // ---------------------------------------------------------------
+    const picker = {
+      dest: null, origin: null, released: false, live: false,
+      bbox: null, defaults: null
+    };
+
+    const pickerEl = document.getElementById('picker');
+    const pickerStep = document.getElementById('picker-step');
+    const pickerHint = document.getElementById('picker-hint');
+    const pickerMode = document.getElementById('picker-mode');
+    const pickerError = document.getElementById('picker-error');
+    const pickerGo = document.getElementById('picker-go');
+    const pickDest = document.getElementById('pick-dest');
+    const pickOrigin = document.getElementById('pick-origin');
+
+    function pin(color, label) {
+      const el = document.createElement('div');
+      el.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;pointer-events:none">
+          <span style="font:600 10px/1 ui-monospace,monospace;color:${color};
+                       background:rgba(0,0,0,.8);padding:2px 5px;border-radius:4px;
+                       border:1px solid ${color};margin-bottom:3px">${label}</span>
+          <span style="width:11px;height:11px;border-radius:50%;background:${color};
+                       box-shadow:0 0 0 3px rgba(0,0,0,.55)"></span>
+        </div>`;
+      return new maplibregl.Marker({ element: el, anchor: 'bottom' });
+    }
+
+    const destMarker = pin('#fbbf24', 'GOAL');
+    const originMarker = pin('#34d399', 'START');
+
+    function fmt(p) { return `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`; }
+
+    function inBBox(p) {
+      const b = picker.bbox;
+      return !b || (p.lat >= b.south && p.lat <= b.north &&
+                    p.lon >= b.west && p.lon <= b.east);
+    }
+
+    function pickerRefresh() {
+      if (picker.released) return;
+      pickerError.classList.add('hidden');
+      pickDest.textContent = picker.dest ? fmt(picker.dest) : 'not set';
+      pickDest.className = 'tabular-nums truncate ' +
+        (picker.dest ? 'text-amber-300' : 'text-neutral-500');
+      pickOrigin.textContent = picker.origin ? fmt(picker.origin) : 'not set';
+      pickOrigin.className = 'tabular-nums truncate ' +
+        (picker.origin ? 'text-emerald-300' : 'text-neutral-500');
+
+      if (!picker.dest) {
+        pickerStep.textContent = 'Click the destination';
+        pickerHint.textContent = 'Anywhere inside the road network. This is the odour source the fly will smell its way toward.';
+      } else if (!picker.origin) {
+        pickerStep.textContent = 'Now click the starting point';
+        pickerHint.textContent = 'Where the fly is dropped into traffic. It spawns on the nearest road to your click.';
+      } else {
+        pickerStep.textContent = 'Ready';
+        pickerHint.textContent = picker.live
+          ? 'Releasing boots the connectome and SUMO. That takes two to three minutes before anything moves.'
+          : 'Mock stream: a random walk, no connectome. Restart with DIPTERAN_LIVE=1 for the real brain.';
+      }
+      if (picker.defaultLabel && !(picker.dest && picker.origin)) {
+        pickerHint.textContent += ` Default: ${picker.defaultLabel}.`;
+      }
+      pickerGo.disabled = !(picker.dest && picker.origin);
+    }
+
+    function pickerFail(message) {
+      pickerError.textContent = message;
+      pickerError.classList.remove('hidden');
+    }
+
+    map.on('click', (e) => {
+      if (picker.released) return;
+      const p = { lat: e.lngLat.lat, lon: e.lngLat.lng };
+      if (!inBBox(p)) {
+        pickerFail('Outside the road network extract. Pick somewhere inside Bangalore.');
+        return;
+      }
+      if (!picker.dest) {
+        picker.dest = p;
+        destMarker.setLngLat([p.lon, p.lat]).addTo(map);
+      } else if (!picker.origin) {
+        picker.origin = p;
+        originMarker.setLngLat([p.lon, p.lat]).addTo(map);
+      }
+      pickerRefresh();
+    });
+
+    document.getElementById('picker-reset').addEventListener('click', () => {
+      picker.dest = picker.origin = null;
+      destMarker.remove();
+      originMarker.remove();
+      pickerRefresh();
+    });
+
+    document.getElementById('picker-default').addEventListener('click', () => {
+      if (!picker.defaults) return;
+      picker.dest = picker.defaults.destination;
+      picker.origin = picker.defaults.origin;
+      destMarker.setLngLat([picker.dest.lon, picker.dest.lat]).addTo(map);
+      originMarker.setLngLat([picker.origin.lon, picker.origin.lat]).addTo(map);
+      map.fitBounds([[picker.origin.lon, picker.origin.lat],
+                     [picker.dest.lon, picker.dest.lat]], { padding: 160 });
+      pickerRefresh();
+    });
+
+    pickerGo.addEventListener('click', async () => {
+      pickerGo.disabled = true;
+      pickerGo.textContent = 'Releasing...';
+      try {
+        const res = await fetch('/route', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ origin: picker.origin, destination: picker.dest })
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `server said ${res.status}`);
+        }
+      } catch (err) {
+        pickerFail(String(err.message || err));
+        pickerGo.disabled = false;
+        pickerGo.textContent = 'Release the fly';
+        return;
+      }
+      picker.released = true;
+      pickerEl.remove();                      // the goal pin stays on the map
+      originMarker.remove();
+      map.flyTo({ center: [picker.origin.lon, picker.origin.lat], zoom: 16 });
+      log(`route set: ${fmt(picker.origin)} -> ${fmt(picker.dest)}`, 'text-emerald-400');
+    });
+
+    fetch('/route')
+      .then(r => r.json())
+      .then(r => {
+        picker.bbox = r.bbox;
+        picker.live = r.live;
+        picker.defaults = { origin: r.origin, destination: r.destination };
+        pickerMode.textContent = r.live ? 'live brain' : 'mock stream';
+        picker.defaultLabel = `${r.origin.label} to ${r.destination.label}`;
+        pickerRefresh();
+      })
+      .catch(() => pickerFail('Could not reach the server for the route bounds.'));
+
+    // ---------------------------------------------------------------
     // Stream
     // ---------------------------------------------------------------
     const FOLLOW_MS = 700;          // camera follow interval; see below
     let lastFollow = 0;
 
-    const ws = new WebSocket(`ws://${location.host}/ws`);
+    // Same-origin, so ws:// over http and wss:// behind a TLS terminator.
+    const ws = new WebSocket(
+      `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     const term = document.getElementById('terminal');
     const barPain = document.getElementById('bar-pain');
     const barPanic = document.getElementById('bar-panic');
@@ -260,6 +479,16 @@
     const stateCaption = document.getElementById('state-caption');
     const dopamineValue = document.getElementById('dopamine-value');
     const speedValue = document.getElementById('speed-value');
+
+    const vitalsHeader = document.getElementById('vitals-header');
+    const vitalsDetail = document.getElementById('vitals-detail');
+    const vitalsArrow = document.getElementById('vitals-arrow');
+    let vitalsOpen = false;
+    vitalsHeader.addEventListener('click', () => {
+      vitalsOpen = !vitalsOpen;
+      vitalsDetail.style.display = vitalsOpen ? 'flex' : 'none';
+      vitalsArrow.style.transform = vitalsOpen ? 'rotate(90deg)' : 'rotate(0deg)';
+    });
 
     function log(text, tone) {
       const item = document.createElement('div');
@@ -276,6 +505,19 @@
         stateTitle.textContent = 'SIMULATION FAILED';
         stateCaption.textContent = data.error;
         log(data.error, 'text-red-400');
+        return;
+      }
+
+      // Nothing to render until a route is picked. Live mode sends bare
+      // status frames through the whole connectome build and SUMO parse --
+      // two to three minutes of no telemetry at all -- and mock mode is
+      // already walking behind the picker, which would look like the fly
+      // has left without us. Both cases stop here.
+      if (!picker.released || typeof data.lat !== 'number') {
+        if (data.status) {
+          stateTitle.textContent = picker.released ? 'BOOTING' : 'AWAITING ROUTE';
+          stateCaption.textContent = data.status;
+        }
         return;
       }
 

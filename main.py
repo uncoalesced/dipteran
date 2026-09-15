@@ -2,11 +2,12 @@
 
 Two modes, because they have very different startup costs:
 
-  mock (default)   Random-walk streamer, starts instantly. This is what
-                   `check_phase1.py`'s scaffold criterion exercises, and it
-                   has a 45 s timeout, so the default cannot be the live
-                   backend -- building W takes ~28 s and SUMO needs another
-                   75-130 s to parse the 862 MB network.
+  mock (default)   Random-walk streamer, starts instantly. Lets the page,
+                   the route picker and the HUD be exercised with no GPU, no
+                   SUMO and no FlyWire download. It is the default because
+                   the live backend costs ~28 s to build W plus 75-130 s for
+                   SUMO to parse the 862 MB network, which is not what you
+                   want from `python main.py` with no arguments.
 
   live             DIPTERAN_LIVE=1. The real FlyBangaloreNavigator over the
                    FlyWire connectome, driving a free-body vehicle through
@@ -19,6 +20,8 @@ together, but they do not have to: the connectome peak is transient. W is
 built and the pandas intermediates freed *before* sumo is launched, which
 lands at 8.5 GB concurrent with 2.4 GB to spare. Reverse the order and it
 OOMs.
+
+Engineered by uncoalesced.
 """
 
 import asyncio
@@ -31,8 +34,9 @@ import time
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -47,6 +51,92 @@ STREAM_HZ = 10.0
 @app.get("/")
 def get_ui():
     return HTMLResponse(HTML_CONTENT)
+
+
+@app.get("/fly-dorsal.png")
+def get_fly_sprite():
+    """The map marker, rendered from the flybody MuJoCo model.
+
+    Unlike the neuropil cloud this one *is* committed -- it derives from
+    TuragaLab/flybody, which is Apache-2.0 rather than CC BY-NC, so the asset
+    can live in the repo as long as the attribution does too (DATA_LICENSE.md).
+    Regenerate with `python scripts/render_fly_sprite.py`.
+    """
+    path = REPO / "assets" / "sprites" / "fly-dorsal.png"
+    if not path.is_file():
+        return JSONResponse(
+            {"error": "not generated",
+             "hint": "python scripts/render_fly_sprite.py"},
+            status_code=404,
+        )
+    return FileResponse(path, media_type="image/png")
+
+
+class Endpoint(BaseModel):
+    lat: float
+    lon: float
+
+
+class RouteRequest(BaseModel):
+    origin: Endpoint
+    destination: Endpoint
+
+
+def _route_config():
+    from dipteran.config import load_config
+
+    return load_config().route
+
+
+@app.get("/route")
+def get_route():
+    """What the picker needs: the default pair, and where picking is legal.
+
+    `bbox` is the OSM extract's own bounds. Outside it there is no road
+    network for SUMO to snap a vehicle to, so the page uses it both as the
+    map's `maxBounds` and as the validity test on a click.
+    """
+    r = _route_config()
+    return {
+        "name": r.name,
+        "origin": {"lat": r.origin.lat, "lon": r.origin.lon,
+                   "label": r.origin.label},
+        "destination": {"lat": r.destination.lat, "lon": r.destination.lon,
+                        "label": r.destination.label},
+        "bbox": {"west": r.bbox.west, "south": r.bbox.south,
+                 "east": r.bbox.east, "north": r.bbox.north},
+        "live": LIVE,
+        "started": SIM.started,
+    }
+
+
+@app.post("/route")
+def post_route(req: RouteRequest):
+    """Accept the pair the user picked and release the simulation.
+
+    In live mode this is what actually boots the thing -- the connectome
+    build and SUMO's 75-130 s network parse are both downstream of it, which
+    is why the endpoint returns immediately and progress arrives over `/ws`
+    as status frames instead. Restarting is deliberately not supported: one
+    SUMO process and one GPU-resident `W` exist per server.
+    """
+    r = _route_config()
+    for name, pt in (("origin", req.origin), ("destination", req.destination)):
+        if not (r.bbox.south <= pt.lat <= r.bbox.north
+                and r.bbox.west <= pt.lon <= r.bbox.east):
+            raise HTTPException(
+                422, f"{name} ({pt.lat:.5f}, {pt.lon:.5f}) is outside the "
+                     f"road network extract")
+    if SIM.started:
+        raise HTTPException(
+            409, "a simulation is already running; restart the server to "
+                 "choose a different route")
+
+    SIM.set_route((req.origin.lat, req.origin.lon),
+                  (req.destination.lat, req.destination.lon))
+    if LIVE:
+        SIM.start()
+    return {"ok": True, "live": LIVE, "status": SIM.status}
 
 
 @app.get("/neuropils.json")
@@ -90,7 +180,19 @@ class Simulation:
         self.latest: dict | None = None
         self.error: str | None = None
         self.started = False
+        # Bumped whenever the route changes, so the mock streamer -- which
+        # runs before anyone has picked anything -- knows to re-seed itself
+        # rather than carrying on from wherever its random walk had got to.
+        self.route_version = 0
+        self.origin: tuple[float, float] | None = None
+        self.goal: tuple[float, float] | None = None
+        self.status = "waiting for a route"
         self._stop = threading.Event()
+
+    def set_route(self, origin: tuple[float, float],
+                  goal: tuple[float, float]) -> None:
+        self.origin, self.goal = origin, goal
+        self.route_version += 1
 
     def start(self) -> None:
         if self.started:
@@ -109,18 +211,20 @@ class Simulation:
             import traceback
 
             self.error = f"{type(exc).__name__}: {exc}"
+            self.status = "failed"
             traceback.print_exc()
 
     def _loop(self) -> None:
         from dipteran.config import load_config
         from dipteran.connectome import build_adjacency, resolve_clusters
-        from dipteran.navigator import (FlyBangaloreNavigator, monoamine_rows,
-                                        telemetry)
+        from dipteran.navigator import (FlyBangaloreNavigator, MotorOutput,
+                                        monoamine_rows, telemetry)
         from dipteran.world import World
 
         cfg = load_config()
 
         # 1. Connectome first: this is the transient 4.3 GB peak.
+        self.status = "building the connectome (~28 s)"
         print("[sim] building the connectome", flush=True)
         built = build_adjacency(cfg)
         clusters = resolve_clusters(cfg, neurons=built["neurons"])
@@ -131,11 +235,14 @@ class Simulation:
         print(f"[sim] navigator ready, gain {cfg.snn.gain}", flush=True)
 
         # 2. Only now start SUMO, with the peak behind us.
+        self.status = "starting SUMO (parsing an 862 MB network, 75-130 s)"
         print("[sim] starting SUMO (this parses an 862 MB network)", flush=True)
         ticks_per_frame = 5                            # 5 x 20 ms = 100 ms
         frame_dt = ticks_per_frame / 50.0
 
-        with World(cfg, step_length=cfg.sumo.step_length) as world:
+        with World(cfg, step_length=cfg.sumo.step_length,
+                   origin=self.origin, goal=self.goal) as world:
+            self.status = "running"
             print(f"[sim] {world.background} background vehicles", flush=True)
             while not self._stop.is_set():
                 frame_started = time.perf_counter()
@@ -149,9 +256,10 @@ class Simulation:
                 sensory["punish_ppl1"] = ppl1
                 navigator.set_sensory(sensory)
 
-                motor = None
-                for _ in range(ticks_per_frame):
-                    motor = navigator.step()
+                # Averaged, not sampled: DNa02 is one neuron per side, so
+                # a single tick quantises `steer` to multiples of 0.1.
+                motor = MotorOutput.average(
+                    [navigator.step() for _ in range(ticks_per_frame)])
 
                 world.apply(motor, frame_dt)
                 world.step_sumo()
@@ -195,14 +303,21 @@ SIM = Simulation()
 # mock scaffold
 # --------------------------------------------------------------------------
 
-def mock_frames():
+def mock_frames(origin=None, goal=None):
     """The Phase 1 random walk.
 
-    Kept so the page, and check_phase1's scaffold criterion, run with no GPU,
-    no SUMO and no FlyWire download.
+    Kept so the page runs with no GPU, no SUMO and no FlyWire download. It
+    takes the picked route so the walk starts where the user pointed and sets
+    off toward the destination, rather than always leaving Silk Board --
+    otherwise the picker would look broken to anyone trying it without the
+    live backend.
     """
-    lat, lon = 12.9177, 77.6238           # Silk Board
-    heading = 45.0                        # toward Tin Factory
+    from dipteran.world import bearing_deg   # stdlib-only at import time
+
+    r = _route_config()
+    lat, lon = origin or (r.origin.lat, r.origin.lon)
+    heading = bearing_deg(lat, lon,
+                          *(goal or (r.destination.lat, r.destination.lon)))
     events = [
         "LC4 SPIKE: Auto cut-in detected",
         "POTHOLE HIT: Campaniform sensilla shock",
@@ -235,6 +350,7 @@ def mock_frames():
             "event": random.choice(events) if random.random() < 0.15 else None,
             "state": state,
             "caption": "Mock scaffold. Set DIPTERAN_LIVE=1 for the real brain.",
+            "status": "running (mock)",
             "steer": round(random.uniform(-1, 1), 2),
             "throttle": round(throttle, 2),
             "dopamine": round(random.uniform(-1, 1), 2),
@@ -252,16 +368,25 @@ async def simulation_feed(ws: WebSocket):
     await ws.accept()
 
     if not LIVE:
-        stream = mock_frames()
+        # Same gate as live mode: nothing streams until a route is posted.
+        # The walk re-seeds if the route changes, which it can in mock mode
+        # because there is no SUMO process to be already committed to one.
+        version, stream = None, None
         try:
             while True:
+                if SIM.origin is None:
+                    await ws.send_json({"status": SIM.status, "booting": False})
+                    await asyncio.sleep(0.2)
+                    continue
+                if SIM.route_version != version:
+                    version = SIM.route_version
+                    stream = mock_frames(SIM.origin, SIM.goal)
                 await ws.send_json(next(stream))
                 await asyncio.sleep(0.05)             # 20 Hz
         except WebSocketDisconnect:
             return
         return
 
-    SIM.start()
     try:
         while True:
             if SIM.error:
@@ -269,6 +394,11 @@ async def simulation_feed(ws: WebSocket):
                 return
             if SIM.latest is not None:
                 await ws.send_json(SIM.latest)
+            else:
+                # Booting, or nobody has posted a route yet. Either way the
+                # page needs something to show for the next two minutes.
+                await ws.send_json({"status": SIM.status,
+                                    "booting": SIM.started})
             await asyncio.sleep(1.0 / STREAM_HZ)
     except WebSocketDisconnect:
         return
