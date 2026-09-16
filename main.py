@@ -34,18 +34,33 @@ import time
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 app = FastAPI()
 
 REPO = Path(__file__).parent
 HTML_CONTENT = (REPO / "index.html").read_text(encoding="utf-8")
+NOT_FOUND_HTML = (REPO / "404.html").read_text(encoding="utf-8")
 
 LIVE = os.environ.get("DIPTERAN_LIVE", "").strip().lower() in {"1", "true", "yes"}
 # One payload per 100 ms control frame; the page interpolates to 60 fps.
 STREAM_HZ = 10.0
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """A 404 on an unmatched route gets the HUD-styled page instead of
+    FastAPI's bare JSON default. Every other status keeps FastAPI's own
+    {"detail": ...} shape -- this only replaces what a browser hits by
+    typo or by an unregistered path, not the deliberate 404s the two
+    asset routes below already return with their own body.
+    """
+    if exc.status_code == 404:
+        return HTMLResponse(NOT_FOUND_HTML, status_code=404)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
 @app.get("/")
