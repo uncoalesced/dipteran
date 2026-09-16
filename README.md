@@ -23,14 +23,40 @@ It's bad at this, which is most of the point.
 
 You need a CUDA GPU, roughly 11 GB of free RAM, and about 30 GB of disk for
 the OSM extract, the SUMO network and the connectome. Linux or WSL2 is the
-tested path. Neither the connectome nor the road network is in this repo, for
-licensing reasons covered in [DATA_LICENSE.md](DATA_LICENSE.md); both get
-downloaded on first run.
+tested path. Native macOS and Linux support, and support for non-NVIDIA GPUs,
+are coming in a future release. Neither the connectome nor the road network
+is in this repo, for licensing reasons covered in
+[DATA_LICENSE.md](DATA_LICENSE.md); both get downloaded on first run.
 
-**1. Python dependencies.**
+**On Windows, everything below runs inside WSL2, not in a native PowerShell
+or cmd prompt.** There's no native-Windows path yet (that's the "coming
+soon" above). Open a WSL2 terminal first -- from PowerShell or cmd, run
+`wsl` to drop into your Linux distro (install one with `wsl --install` if
+you haven't), or open the distro directly from the Start menu. Everything
+from here on is a bash command run inside that WSL2 shell.
+
+**1. Python dependencies.** Run the setup script:
 
 ```bash
-uv venv --python 3.12 .venv && source .venv\Scripts\activate
+bash scripts/setup_wsl.sh
+```
+
+This creates `.venv`, installs `requirements.txt`, and installs torch from
+the CUDA 12.8 index (required -- see the comment at the top of
+`requirements.txt`). If the repo is sitting on a Windows drive
+(`/mnt/c/...`, `/mnt/e/...`, etc.) it stops immediately and prints the two
+commands that fix that, rather than failing partway through a 20-minute
+install with a `Operation not permitted` error that gives no hint why: in
+short, `uv`/pip reliably fail installing into a venv on a DrvFs-mounted
+Windows drive, so the script insists the repo live on WSL2's own
+filesystem (e.g. `~/dipteran`) first.
+
+Prefer to do it by hand, or troubleshooting a failure? That's all the
+script above does:
+
+```bash
+uv venv --python 3.12 .venv
+source .venv/bin/activate
 uv pip install -r requirements.txt
 uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 ```
@@ -109,7 +135,7 @@ accident.
 Open the page. It asks two questions and then gets out of the way.
 
 1. **Click your destination.** This is the odour source. The fly gets a
-   concentration gradient toward it and nothing else — no waypoints, no turn
+   concentration gradient toward it and nothing else: no waypoints, no turn
    list. Anywhere inside the road network extract works.
 2. **Click your starting point.** The fly spawns on the nearest road to your
    click, dropped into 300 background SUMO vehicles.
@@ -148,7 +174,7 @@ Two road-network representations, built from one shared OSM extract and joined
 by ID. OSMnx gives the graph the fly reasons over, bearing and distance to
 goal. netconvert gives SUMO the network its traffic actually drives on. The
 join matches OSM way IDs first to narrow the candidates cheaply, then uses
-polyline distance to decide which of those candidates really overlap — one
+polyline distance to decide which of those candidates really overlap. One
 long OSM way splits into many edges in both graphs, so a pure way-ID join is
 far too coarse.
 
@@ -164,7 +190,7 @@ of going per-synapse. Dopaminergic, serotonergic and octopaminergic rows are
 dropped from that fast path entirely and act through a plastic overlay, which
 is closer to what monoamines do anyway.
 
-The vehicle is a free body — `moveToXY` with `keepRoute=2`, soft-pulled toward
+The vehicle is a free body: `moveToXY` with `keepRoute=2`, soft-pulled toward
 the nearest road rather than constrained to a route. It can end up somewhere
 stupid. That's allowed.
 
@@ -188,13 +214,13 @@ against 13,116, so both cells are reconstructed about equally well. The left
 one is just quiet.
 
 Directional drive goes into PFL3, not the odour PNs. Six projection neurons
-can't move a cell with in-degree 742, and measuring it confirmed as much —
-they shift DNa02 by 2.2 Hz in the wrong direction. PFL3 gives 40.3 Hz of
-monotonic authority. The projection is contralateral, 12 synapses from
-PFL3-right onto DNa02-left and zero ipsilateral, read straight out of `W`, so
-a goal on the right drives the *left* lobe. There's a unit test asserting that
-sign, because a plausible-looking backwards formula is exactly the bug that
-got caught twice during design.
+can't move a cell with in-degree 742, and measuring it confirmed as much: they
+shift DNa02 by 2.2 Hz in the wrong direction. PFL3 gives 40.3 Hz of monotonic
+authority. The projection is contralateral, 12 synapses from PFL3-right onto
+DNa02-left and zero ipsilateral, read straight out of `W`, so a goal on the
+right drives the *left* lobe. There's a unit test asserting that sign, because
+a plausible-looking backwards formula is exactly the bug that got caught twice
+during design.
 
 Measured end to end: -4.1°/s for a goal 90° left, +5.2°/s for 45° right,
 +0.005°/s dead ahead.
@@ -217,9 +243,9 @@ near-collisions.
 ## Where it actually is
 
 The unit suite passes, ruff is clean, and each module self-checks on
-`python -m dipteran.<module>`. The full loop runs at 1.27x real time —
-78.6 ms of work in a 100 ms frame — for 25,727 consecutive frames with no
-stalls and bounded plastic weight drift.
+`python -m dipteran.<module>`. The full loop runs at 1.27x real time (78.6 ms
+of work in a 100 ms frame) for 25,727 consecutive frames with no stalls and
+bounded plastic weight drift.
 
 Phase 3 fixed the steering, and the steering now demonstrably points the right
 way. Two things about it are still wrong. `steer` saturates on the left,
@@ -303,6 +329,14 @@ box, device and dtype, every LIF and reinforcement parameter, every motor
 transfer scale, all file paths. No hardcoded coordinates or tuning constants
 anywhere in the code. Run `python -m dipteran.config` and it'll tell you if the
 file is wrong.
+
+---
+
+## Contributing
+
+Bug reports, pull requests and platform-support help are welcome.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the setup, the checklist a PR needs to
+pass, and the project's conventions.
 
 ---
 
