@@ -1,0 +1,58 @@
+{
+  "_note": "Baselines for scripts/regression_check.py. `expect` is computed by regression_check.metrics() over the file named in `source`, so the two cannot disagree. This is not a pass/fail bar -- PLAN.md section 9 rejected arrival as one. It records what was measured so a later run that moves can be noticed.",
+  "_caveat_no_route_frames": "Runs recorded before 2026-09-22 count `no_route_frames` as routing failures only. From the route-anchor fix onward they also count junction transits, reported separately as `internal_edge_frames`. The two are not directly comparable across that boundary.",
+  "routes": {
+    "oneturn_500m": {
+      "description": "500 m, one turn over 45 degrees, 10 edges",
+      "origin": "12.93143,77.62261",
+      "dest": "12.92760,77.62251",
+      "episodes": 15,
+      "episode_minutes": 2.0,
+      "max_minutes": 45.0,
+      "source": "runs/oneturn_500m_2026-09-19.json",
+      "recorded": "2026-09-19",
+      "caveats": [
+        "predates closed_route_m / no_route_frames -- those are null",
+        "the project's only evidence that the carried plastic weights do anything: frames-to-arrival fell 857 -> ~730"
+      ],
+      "expect": {
+        "episodes_arrived": 11,
+        "episode_count": 15,
+        "frames_to_arrival_mean": 790.818,
+        "closed_route_m_mean": null,
+        "heading_error_abs_median": 21.6,
+        "steer_sign_agreement": 0.649,
+        "no_route_frames_mean": null,
+        "internal_edge_frames_mean": null,
+        "travelled_m": 192.3,
+        "plastic_drift_relative": 0.000309
+      }
+    },
+    "twisty_2400m": {
+      "description": "2,398 m along route to cover 502 m direct; one-way loop system, 49 edges, 17 turns over 45 deg",
+      "origin": "12.92143,77.63576",
+      "dest": "12.92581,77.63463",
+      "episodes": 3,
+      "episode_minutes": 6.0,
+      "max_minutes": 25.0,
+      "source": "runs/twisty_2400m_2026-09-22.json",
+      "recorded": "2026-09-22",
+      "caveats": [
+        "never closed: best honest closure on record is 416.6 m of 2,398 m",
+        "four edges on this route are sinks with no outgoing connections (310456191, 310456195, 310456204, 794624007) -- confirmed offline, present in the right-hand network too"
+      ],
+      "expect": {
+        "episodes_arrived": 0,
+        "episode_count": 3,
+        "frames_to_arrival_mean": null,
+        "closed_route_m_mean": 146.6,
+        "heading_error_abs_median": 27.3,
+        "steer_sign_agreement": 0.724,
+        "no_route_frames_mean": 469.667,
+        "internal_edge_frames_mean": null,
+        "travelled_m": 1062.2,
+        "plastic_drift_relative": 0.000451
+      }
+    }
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "arrived": false,
+  "episodes": [
+    {
+      "episode": 1,
+      "arrived": false,
+      "frames": 3600,
+      "closed_m": 15.7,
+      "closed_route_m": 416.6,
+      "best_route_m": 1981.1,
+      "best_distance_m": 486.5,
+      "travelled_m": 1072.7,
+      "no_route_frames": 956,
+      "plastic_drift": 0.00046
+    },
+    {
+      "episode": 2,
+      "arrived": false,
+      "frames": 3600,
+      "closed_m": 145.1,
+      "closed_route_m": 13.1,
+      "best_route_m": 489.1,
+      "best_distance_m": 357.1,
+      "travelled_m": 1036.4,
+      "no_route_frames": 390,
+      "plastic_drift": 0.001017
+    },
+    {
+      "episode": 3,
+      "arrived": false,
+      "frames": 3600,
+      "closed_m": 123.9,
+      "closed_route_m": 10.1,
+      "best_route_m": 492.1,
+      "best_distance_m": 378.3,
+      "travelled_m": 1062.2,
+      "no_route_frames": 63,
+      "plastic_drift": 0.000451
+    }
+  ],
+  "episode_count": 3,
+  "episodes_arrived": 0,
+  "closed_m_first_third": 15.7,
+  "closed_m_last_third": 123.9,
+  "origin": [
+    12.92143,
+    77.63576
+  ],
+  "goal": [
+    12.92581,
+    77.63463
+  ],
+  "frames": 10800,
+  "sim_seconds": 1080.0,
+  "wall_seconds": 923.3,
+  "startup_seconds": 76.6,
+  "loop_seconds": 846.7,
+  "realtime_factor": 1.28,
+  "realtime_paced": false,
+  "distance_start_m": 502.2,
+  "distance_end_m": 384.5,
+  "distance_min_m": 378.3,
+  "closed_m": 123.9,
+  "travelled_m": 1062.2,
+  "edges_visited": 142,
+  "final_edge": "-310456178#0",
+  "off_network_frames": 0,
+  "off_road_m_median": 1.0,
+  "off_road_m_max": 2.33,
+  "speed_ms_median": 4.045,
+  "speed_ms_max": 5.596,
+  "steer_abs_median": 0.029,
+  "steer_abs_max": 0.291,
+  "heading_error_abs_median": 27.3,
+  "heading_error_abs_p90": 128.6,
+  "steer_sign_agreement": 0.724,
+  "steer_sign_votes": 8535,
+  "panic_frames": 5,
+  "pothole_frames": 191,
+  "stall_peak_s": 0.0,
+  "events": {
+    "pothole": 191,
+    "loom": 1
+  },
+  "states": {
+    "IDLE DRIFT": 10581,
+    "POTHOLE IMPACT": 191,
+    "ODOR TRACKING": 23,
+    "PANIC SWERVE": 5
+  },
+  "plastic_drift_relative": 0.000451,
+  "plastic_finite": true,
+  "plastic_synapses": 115849,
+  "frames_per_s": 12.76,
+  "phase_ms_per_frame": {
+    "sense_ms": 0.82,
+    "snn_ms": 66.06,
+    "apply_ms": 9.88,
+    "step_ms": 1.56
+  },
+  "background_vehicles": 259,
+  "min_syn_count": 0,
+  "gain": 16.0
+}

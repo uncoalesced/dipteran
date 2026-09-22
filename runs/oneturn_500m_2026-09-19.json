@@ -1,0 +1,202 @@
+{
+  "arrived": true,
+  "episodes": [
+    {
+      "episode": 1,
+      "arrived": true,
+      "frames": 857,
+      "closed_m": 226.2,
+      "best_distance_m": 199.9,
+      "travelled_m": 267.8,
+      "plastic_drift": 0.000538
+    },
+    {
+      "episode": 2,
+      "arrived": false,
+      "frames": 1200,
+      "closed_m": 128.7,
+      "best_distance_m": 297.3,
+      "travelled_m": 197.3,
+      "plastic_drift": 0.00066
+    },
+    {
+      "episode": 3,
+      "arrived": false,
+      "frames": 1200,
+      "closed_m": 162.8,
+      "best_distance_m": 263.2,
+      "travelled_m": 368.6,
+      "plastic_drift": 0.000789
+    },
+    {
+      "episode": 4,
+      "arrived": false,
+      "frames": 1200,
+      "closed_m": 134.3,
+      "best_distance_m": 291.7,
+      "travelled_m": 344.4,
+      "plastic_drift": 0.001163
+    },
+    {
+      "episode": 5,
+      "arrived": true,
+      "frames": 729,
+      "closed_m": 226.1,
+      "best_distance_m": 199.9,
+      "travelled_m": 268.2,
+      "plastic_drift": 0.000619
+    },
+    {
+      "episode": 6,
+      "arrived": true,
+      "frames": 710,
+      "closed_m": 226.1,
+      "best_distance_m": 199.9,
+      "travelled_m": 264.3,
+      "plastic_drift": 0.000666
+    },
+    {
+      "episode": 7,
+      "arrived": true,
+      "frames": 723,
+      "closed_m": 226.2,
+      "best_distance_m": 199.8,
+      "travelled_m": 266.2,
+      "plastic_drift": 0.000621
+    },
+    {
+      "episode": 8,
+      "arrived": true,
+      "frames": 752,
+      "closed_m": 226.3,
+      "best_distance_m": 199.8,
+      "travelled_m": 270.6,
+      "plastic_drift": 0.000612
+    },
+    {
+      "episode": 9,
+      "arrived": true,
+      "frames": 739,
+      "closed_m": 226.1,
+      "best_distance_m": 199.9,
+      "travelled_m": 266.4,
+      "plastic_drift": 0.000622
+    },
+    {
+      "episode": 10,
+      "arrived": true,
+      "frames": 1070,
+      "closed_m": 226.0,
+      "best_distance_m": 200.0,
+      "travelled_m": 284.5,
+      "plastic_drift": 0.000532
+    },
+    {
+      "episode": 11,
+      "arrived": true,
+      "frames": 723,
+      "closed_m": 226.1,
+      "best_distance_m": 199.9,
+      "travelled_m": 267.8,
+      "plastic_drift": 0.000645
+    },
+    {
+      "episode": 12,
+      "arrived": true,
+      "frames": 790,
+      "closed_m": 226.3,
+      "best_distance_m": 199.7,
+      "travelled_m": 269.5,
+      "plastic_drift": 0.000598
+    },
+    {
+      "episode": 13,
+      "arrived": true,
+      "frames": 850,
+      "closed_m": 226.2,
+      "best_distance_m": 199.8,
+      "travelled_m": 275.0,
+      "plastic_drift": 0.00059
+    },
+    {
+      "episode": 14,
+      "arrived": true,
+      "frames": 756,
+      "closed_m": 226.0,
+      "best_distance_m": 200.0,
+      "travelled_m": 268.9,
+      "plastic_drift": 0.000635
+    },
+    {
+      "episode": 15,
+      "arrived": false,
+      "frames": 1200,
+      "closed_m": 145.1,
+      "best_distance_m": 280.9,
+      "travelled_m": 192.3,
+      "plastic_drift": 0.000309
+    }
+  ],
+  "episode_count": 15,
+  "episodes_arrived": 11,
+  "closed_m_first_third": 175.6,
+  "closed_m_last_third": 209.9,
+  "origin": [
+    12.93143,
+    77.62261
+  ],
+  "goal": [
+    12.9276,
+    77.62251
+  ],
+  "frames": 13499,
+  "sim_seconds": 1349.9,
+  "wall_seconds": 1122.8,
+  "startup_seconds": 87.7,
+  "loop_seconds": 1035.1,
+  "realtime_factor": 1.3,
+  "realtime_paced": false,
+  "distance_start_m": 426.0,
+  "distance_end_m": 287.6,
+  "distance_min_m": 280.9,
+  "closed_m": 145.1,
+  "travelled_m": 192.3,
+  "edges_visited": 13,
+  "final_edge": "27785733#1",
+  "off_network_frames": 0,
+  "off_road_m_median": 0.66,
+  "off_road_m_max": 2.17,
+  "speed_ms_median": 3.988,
+  "speed_ms_max": 5.897,
+  "steer_abs_median": 0.029,
+  "steer_abs_max": 0.351,
+  "heading_error_abs_median": 21.6,
+  "heading_error_abs_p90": 149.5,
+  "steer_sign_agreement": 0.649,
+  "steer_sign_votes": 9909,
+  "panic_frames": 24,
+  "pothole_frames": 0,
+  "stall_peak_s": 0.0,
+  "events": {
+    "loom": 2
+  },
+  "states": {
+    "PANIC SWERVE": 24,
+    "IDLE DRIFT": 13218,
+    "ODOR TRACKING": 125,
+    "HORN OVERDRIVE": 132
+  },
+  "plastic_drift_relative": 0.000309,
+  "plastic_finite": true,
+  "plastic_synapses": 115849,
+  "frames_per_s": 13.04,
+  "phase_ms_per_frame": {
+    "sense_ms": 0.86,
+    "snn_ms": 65.84,
+    "apply_ms": 9.19,
+    "step_ms": 0.72
+  },
+  "background_vehicles": 254,
+  "min_syn_count": 0,
+  "gain": 16.0
+}
