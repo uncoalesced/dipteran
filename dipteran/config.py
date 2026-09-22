@@ -234,7 +234,13 @@ class Snn(BaseModel):
     # rather than a data artefact. Left in, `steer` is positive on every tick
     # and the vehicle can only turn right. Reproduce with
     # `python scripts/probe_diagnostics.py`.
-    steer_bias: float = 0.191
+    #
+    # Moves with `steer_half_angle_deg`, because it is measured at the
+    # dead-ahead operating point and that point is cos(half_angle). 0.209 is
+    # the 70-degree figure; the 0.191 this defaulted to until 2026-09-22 was
+    # measured at 45. Kept in step with config.yaml deliberately -- a stale
+    # default here stays invisible until someone runs without a config file.
+    steer_bias: float = 0.209
 
     # -- reward shaping --------------------------------------------------
     # Metres of progress that earn a dopamine pulse. Was 100 m, which fired

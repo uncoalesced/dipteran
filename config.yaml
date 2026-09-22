@@ -136,12 +136,28 @@ snn:
   # 0.063 this probe reproduces with no directional input at all).
   #
   # Measured at the dead-ahead operating point: both PFL3 lobes at
-  # cos(45) * SENSORY_CEILING = 0.283, which is what world.sense() injects
-  # when the fly is pointed straight at the goal. DNa02 right 95.5 Hz, left
-  # 0.0 Hz. With it subtracted, steer decodes as 0.000 dead ahead, +0.046
-  # with the goal hard right and -0.034 hard left -- signed, and usable in
-  # both directions.
-  steer_bias: 0.191
+  # cos(steer_half_angle_deg) * SENSORY_CEILING, which is what world.sense()
+  # injects when the fly is pointed straight at the goal. At the configured
+  # 70 degrees that is 0.137, and DNa02 rests at right 104.851 Hz, left
+  # 0.373 Hz -- so the readout's resting value is (104.851 - 0.373) / 500 =
+  # 0.209.
+  #
+  # Was 0.191: the same measurement taken at a 45-degree lobe width the loop
+  # stopped using on 2026-09-19. The probe went on quoting it because it
+  # hardcoded cos(45) until 2026-09-22 (c8fc19c). Left at 0.191 in that
+  # session to avoid confounding an in-flight repro; retuned here after
+  # re-running the corrected probe three times and confirming the figure is
+  # bit-identical each time -- the path is analytic, no RNG and no SUMO, so
+  # anything else would have been a finding in itself.
+  #
+  # What the stale value actually cost: at 0.191 the probe's own
+  # `straight_is_neutral` check was **False** -- dead ahead decoded to
+  # +0.0180 rather than 0.000, a standing rightward lean on a fly pointed
+  # straight at its goal. 0.191 + 0.0180 = 0.209 is exactly that residual.
+  # The live loop re-measures its own offset every episode (steer_bias_tau_s
+  # below), which is why this was a lean rather than the Phase 2 orbit -- but
+  # this value is still the fallback that lean starts from.
+  steer_bias: 0.209
 
   # -- reward shaping ----------------------------------------------------
   # Metres of progress that earn a dopamine pulse. Was 100 m. The whole Phase
