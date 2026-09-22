@@ -351,6 +351,11 @@ class World:
         self._route_edges: list[str] = []
         self._route_length_m: float | None = None
         self._route_anchor_pos: float = 0.0
+        # Which edge `_route_anchor_pos` was measured on. `edge_pos` is a
+        # position *along one edge*, so subtracting an anchor taken on a
+        # different edge is comparing two unrelated rulers -- see
+        # `_route_distance_m`.
+        self._route_anchor_edge: str | None = None
         self._route_retry: int = 0
         self._lane_shapes: dict[str, list | None] = {}
         # Last live route distance, held across routing failures so the
@@ -711,6 +716,7 @@ class World:
                 self._route_edges = list(stage.edges)
                 self._route_length_m = stage.length
                 self._route_anchor_pos = self.state.edge_pos
+                self._route_anchor_edge = edge
                 self._no_route_frames = 0
             else:
                 self._route_failed(edge, "findRoute returned no path")
@@ -767,8 +773,32 @@ class World:
         crow-flies distance instead" -- see `_route_distance_now`, which is
         what callers should read. Substituting one for the other is what
         produced this project's most misleading number to date.
+
+        The anchor is only meaningful against the edge it was measured on.
+        `edge_pos` is a position along *one* edge, so `edge_pos - anchor`
+        across two different edges subtracts two unrelated rulers. That is
+        reachable every time the fly crosses a junction: `_pull_to_road`
+        sets `state.edge` from raw `_edge_at`, which answers with an
+        internal `:cluster_...` edge inside a junction (the same behaviour
+        `_road_edge_near` exists to work around), while `_update_route`
+        early-returns on those and leaves the anchor pointing at the edge
+        before the junction.
+
+        Measured on the synthetic repro: route 2,000 m, anchor 0 on edge A,
+        fly 400 m along A (1,600 m remaining), then one frame on a junction
+        edge at `edge_pos` 2.0 -- published distance jumped to 1,998 m. A
+        398 m backward step in one 0.1 s frame reads as 3,980 m/s of
+        driving away from the goal, and `_punishments` fires PPL1 on
+        anything over `snn.wrong_way_threshold_ms` (0.5), saturating a
+        detector whose full scale is 4.0 m/s. `rewards()` is unaffected --
+        its gate is a *new best*, and a backward jump never sets one.
+
+        Refusing to answer is the right failure mode here for the same
+        reason it is in `_route_failed`: `_route_distance_now` holds the
+        last live value, and `route_valid` reports that it did.
         """
-        if self._route_length_m is None:
+        if (self._route_length_m is None
+                or self.state.edge != self._route_anchor_edge):
             return None
         travelled = max(0.0, self.state.edge_pos - self._route_anchor_pos)
         return max(0.0, self._route_length_m - travelled)
@@ -818,11 +848,19 @@ class World:
         """Whether `route_distance_to_goal_m` is a live route measurement.
 
         False while routing is failing (the value is the last known one,
-        held) or before the first route ever resolved (it is crow-flies).
-        Recorded per episode so a run whose numbers were taken during an
-        outage is identifiable afterwards instead of silently averaged in.
+        held), before the first route ever resolved (it is crow-flies), and
+        on the junction frames where the anchor belongs to a different edge
+        than the fly is standing on. Recorded per episode so a run whose
+        numbers were taken during an outage is identifiable afterwards
+        instead of silently averaged in.
+
+        Asks `_route_distance_m` rather than testing `_route_length_m`
+        directly, so the two cannot drift apart: there is exactly one
+        definition of "is this a live measurement", and it is the one the
+        published value is computed from. The call is arithmetic on fields
+        already in hand, not a traci round trip.
         """
-        return self._route_length_m is not None
+        return self._route_distance_m() is not None
 
     def _route_target(self) -> tuple[float, float]:
         """Where to steer: a point further down the road route to the goal,
@@ -1302,6 +1340,7 @@ class World:
         self._route_edge = None
         self._route_edges = []
         self._route_length_m = None
+        self._route_anchor_edge = None
         # The held route distance goes with it. Holding the *previous*
         # episode's last route distance across a teleport back to the origin
         # would be exactly the stale-value bug `_route_distance_now` exists

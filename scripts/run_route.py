@@ -97,6 +97,15 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
         # `World._route_distance_now`. Non-zero here means read the episode's
         # numbers with that in mind.
         episode_no_route_frames = 0
+        # Of those, the ones that are only a junction transit. `_edge_at`
+        # answers with an internal `:cluster_...` edge inside a junction, and
+        # `World._route_distance_m` declines to measure against an anchor from
+        # another edge, so these count as "held, not measured" alongside real
+        # routing failures. Separated here because they are a different thing:
+        # a two-metre crossing, not a disconnected component. Runs recorded
+        # before 2026-09-22 have no equivalent -- their `no_route_frames` count
+        # routing failures only, so the two are not directly comparable.
+        episode_internal_edge_frames = 0
         off_network = 0
         off_road: list[float] = []
         panic_frames = 0
@@ -181,6 +190,8 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
             route_min = min(route_min, s.route_distance_to_goal_m)
             if not world.route_valid:
                 episode_no_route_frames += 1
+                if s.edge.startswith(":"):
+                    episode_internal_edge_frames += 1
 
             # -- episode boundary ------------------------------------------
             # Arriving, or running out of episode, ends an *attempt* rather
@@ -227,6 +238,8 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                     # route figures were held rather than measured for part
                     # of this episode.
                     "no_route_frames": episode_no_route_frames,
+                    # The junction-transit share of the line above.
+                    "internal_edge_frames": episode_internal_edge_frames,
                     "plastic_drift": round(navigator.drift(), 6),
                 })
                 print(f"[route] episode {len(episodes)}: "
@@ -235,7 +248,8 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                       f"{closed_route:.0f} m of route "
                       f"({episode_start_m - distance_min:.0f} m direct), "
                       f"travelled {s.travelled_m:.0f} m, "
-                      f"{episode_no_route_frames} frames no route, "
+                      f"{episode_no_route_frames} frames no route "
+                      f"({episode_internal_edge_frames} in junctions), "
                       f"drift {navigator.drift():.2e}", flush=True)
                 if len(episodes) >= max_episodes:
                     break
@@ -246,6 +260,7 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                 episode_start_route_m = s.route_distance_to_goal_m
                 route_min = s.route_distance_to_goal_m
                 episode_no_route_frames = 0
+                episode_internal_edge_frames = 0
                 continue
 
             now = time.monotonic()

@@ -1044,21 +1044,27 @@ def test_world_takes_an_origin_and_goal_override():
 
 
 def _route_distance_fixture(route_len, anchor, edge_pos, crow_flies,
-                            last_route):
+                            last_route, edge="-123624220#4"):
     """A World with only the fields `_route_distance_now` reads.
 
     Built with `__new__` rather than `World(...)`: the real constructor
     launches a SUMO subprocess and parses an 862 MB network, and none of
     that has any bearing on the arithmetic under test here.
+
+    The fly stands on the same edge the anchor was measured on, which is the
+    ordinary case. `test_route_distance_refuses_an_anchor_from_another_edge`
+    is what moves the two apart.
     """
     from dipteran.world import VehicleState, World
 
     world = World.__new__(World)
     world.state = VehicleState(lat=12.92143, lon=77.63576)
+    world.state.edge = edge
     world.state.edge_pos = edge_pos
     world.state.distance_to_goal_m = crow_flies
     world._route_length_m = route_len
     world._route_anchor_pos = anchor
+    world._route_anchor_edge = edge
     world._last_route_m = last_route
     return world
 
@@ -1112,6 +1118,54 @@ def test_route_distance_seeds_from_crow_flies_before_any_route():
     world = _route_distance_fixture(None, 0.0, 0.0, 502.0, None)
     assert not world.route_valid
     assert world._route_distance_now() == 502.0
+
+
+def test_route_distance_refuses_an_anchor_from_another_edge():
+    """`edge_pos` is a position along *one* edge; the anchor must match it.
+
+    Reachable on every junction crossing, not just on the one-way loop the
+    2026-09-22 handoff proposed. `_pull_to_road` sets `state.edge` from raw
+    `_edge_at`, which answers with an internal `:cluster_...` edge inside a
+    junction -- the same behaviour `_road_edge_near` exists to work around --
+    while `_update_route` early-returns on internal edges and so leaves the
+    anchor pointing at the edge before the junction.
+
+    Measured on the synthetic repro against the pre-fix code: route 2,000 m,
+    anchor 0 on edge A, fly 400 m along A (1,600 m remaining), then one frame
+    on a junction edge at `edge_pos` 2.0 published **1,998 m**. A 398 m
+    backward step in one 0.1 s frame is 3,980 m/s of apparent wrong-way
+    driving, against a detector whose threshold is 0.5 m/s and whose full
+    scale is 4.0 m/s -- so it saturates, every junction.
+
+    (The handoff's own proposed mechanism -- a lap revisiting an edge ID --
+    does not reach this: `_update_route` reassigns `_route_edge` on every
+    non-internal edge, so after a lap the guard compares against the
+    *previous* edge and the recompute fires normally.)
+    """
+    world = _route_distance_fixture(2000.0, 0.0, 400.0, 480.0, None,
+                                    edge="-123624220#4")
+    assert world.route_valid
+    assert world._route_distance_now() == 1600.0
+
+    # One frame inside the junction. Same route, but `edge_pos` is now
+    # measured along a six-metre internal edge.
+    world.state.edge = ":cluster_7_0"
+    world.state.edge_pos = 2.0
+    assert not world.route_valid, (
+        "an anchor measured on another edge was reported as a live "
+        "measurement -- this is the junction spike")
+    assert world._route_distance_now() == 1600.0, (
+        "the junction frame republished 1998 m: a 398 m backward jump that "
+        "reads as 3980 m/s of wrong-way driving and fires PPL1")
+
+    # Out the far side: a fresh route, measured from the new edge.
+    world._route_length_m = 1500.0
+    world._route_anchor_pos = 0.0
+    world._route_anchor_edge = "27785733#1"
+    world.state.edge = "27785733#1"
+    world.state.edge_pos = 0.0
+    assert world.route_valid
+    assert world._route_distance_now() == 1500.0
 
 
 def main() -> int:
