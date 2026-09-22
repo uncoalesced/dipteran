@@ -37,7 +37,10 @@ TICKS_PER_FRAME = 5      # 5 x 20 ms = one 100 ms control frame
 FRAME_DT = TICKS_PER_FRAME / 50.0
 
 
-def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
+def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
+        origin: tuple[float, float] | None = None,
+        goal: tuple[float, float] | None = None,
+        max_episodes: int = 1, episode_minutes: float = 0.0) -> dict:
     import torch
 
     from dipteran.connectome import build_adjacency, resolve_clusters
@@ -61,8 +64,13 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
     started = time.monotonic()
     deadline = started + max_minutes * 60.0
     next_report = started + progress_every
+    # An episode ends on arrival or after this many frames, whichever comes
+    # first. 0 means "no limit": one attempt that runs until it arrives or
+    # the whole run times out, which is the pre-episode behaviour.
+    episode_limit = int(episode_minutes * 60.0 / FRAME_DT)
 
-    with World(cfg, step_length=cfg.sumo.step_length) as world:
+    with World(cfg, step_length=cfg.sumo.step_length,
+               origin=origin, goal=goal) as world:
         print(f"[route] {world.background} background vehicles", flush=True)
         s = world.state
         distance_start = s.distance_to_goal_m
@@ -74,6 +82,15 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
         events: collections.Counter = collections.Counter()
         speeds: list[float] = []
         steers: list[float] = []
+        errors: list[float] = []
+        steer_votes = 0
+        steer_agrees = 0
+        # Episode bookkeeping -- see the episode boundary in the loop.
+        episodes: list[dict] = []
+        episode_frames = 0
+        episode_start_m = distance_start
+        episode_start_route_m = s.route_distance_to_goal_m
+        route_min = s.route_distance_to_goal_m
         off_network = 0
         off_road: list[float] = []
         panic_frames = 0
@@ -116,6 +133,7 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
             world.step_sumo()
             cost["step_ms"] += (time.perf_counter() - t) * 1000
             frames += 1
+            episode_frames += 1
 
             title, _ = classify_state(
                 motor, speed_ms=s.speed, throttle_cmd=s.throttle_cmd,
@@ -127,6 +145,20 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
                 edges.add(s.edge)
             speeds.append(s.speed)
             steers.append(motor.steer)
+            # The compass-versus-motor question, recorded per frame: how far
+            # off the route target the fly is pointing, and whether it is
+            # steering the way that error asks. A large standing error with
+            # steer of the wrong sign is a different bug from the same error
+            # with the right sign and not enough of it.
+            errors.append(s.heading_error_deg)
+            # Votes on the *filtered* command, because that is what the
+            # vehicle turns on. Voting on the raw per-frame readout measures
+            # the noise the filter exists to remove.
+            command = s.steer_filtered
+            if abs(s.heading_error_deg) > 10.0 and command != 0.0:
+                steer_votes += 1
+                if (command > 0) == (s.heading_error_deg > 0):
+                    steer_agrees += 1
             if s.off_road_m == float("inf"):
                 off_network += 1
             else:
@@ -140,11 +172,54 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
                 events["loom"] += 1
             stall_peak = max(stall_peak, s.stalled_s)
             distance_min = min(distance_min, s.distance_to_goal_m)
+            route_min = min(route_min, s.route_distance_to_goal_m)
 
-            if s.distance_to_goal_m <= ARRIVAL_M:
-                arrived = True
-                print(f"[route] ARRIVED after {frames} frames", flush=True)
-                break
+            # -- episode boundary ------------------------------------------
+            # Arriving, or running out of episode, ends an *attempt* rather
+            # than the run. `reset_episode` teleports the fly back to the
+            # origin and clears the navigator's membrane state, deliberately
+            # keeping `p_val` -- the plastic overlay is the only thing the
+            # fly carries forward, and it is the entire point of running
+            # more than one attempt. At learning_rate 1e-4 a single pass is
+            # far too short for the three-factor rule to move anything, so
+            # until this loop existed every run was a naive fly.
+            episode_over = (s.distance_to_goal_m <= ARRIVAL_M
+                            or (episode_frames >= episode_limit > 0))
+            if episode_over:
+                hit = s.distance_to_goal_m <= ARRIVAL_M
+                arrived = arrived or hit
+                episodes.append({
+                    "episode": len(episodes) + 1,
+                    "arrived": hit,
+                    "frames": episode_frames,
+                    "closed_m": round(episode_start_m - distance_min, 1),
+                    # Crow-flies closure badly understates a one-way system:
+                    # this network has pairs 500 m apart that are a 2.4 km
+                    # drive, where real progress barely moves the straight
+                    # line. Route distance is what the fly is actually
+                    # working against, and what `rewards()` gates on.
+                    "closed_route_m": round(
+                        episode_start_route_m - route_min, 1),
+                    "best_route_m": round(route_min, 1),
+                    "best_distance_m": round(distance_min, 1),
+                    "travelled_m": round(s.travelled_m, 1),
+                    "plastic_drift": round(navigator.drift(), 6),
+                })
+                print(f"[route] episode {len(episodes)}: "
+                      f"{'ARRIVED' if hit else 'timed out'} after "
+                      f"{episode_frames} frames, closed "
+                      f"{episode_start_route_m - route_min:.0f} m of route "
+                      f"({episode_start_m - distance_min:.0f} m direct), "
+                      f"drift {navigator.drift():.2e}", flush=True)
+                if len(episodes) >= max_episodes:
+                    break
+                world.reset_episode(navigator)
+                episode_frames = 0
+                episode_start_m = s.distance_to_goal_m
+                distance_min = s.distance_to_goal_m
+                episode_start_route_m = s.route_distance_to_goal_m
+                route_min = s.route_distance_to_goal_m
+                continue
 
             now = time.monotonic()
             if now >= next_report:
@@ -168,6 +243,15 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
 
         return {
             "arrived": arrived,
+            "episodes": episodes,
+            "episode_count": len(episodes),
+            "episodes_arrived": sum(1 for e in episodes if e["arrived"]),
+            # The number that says whether anything was learned: closed
+            # distance in the last third of the episodes against the first.
+            "closed_m_first_third": _mean_closed(episodes, "first"),
+            "closed_m_last_third": _mean_closed(episodes, "last"),
+            "origin": [round(world.origin[0], 6), round(world.origin[1], 6)],
+            "goal": [round(world.goal[0], 6), round(world.goal[1], 6)],
             "frames": frames,
             "sim_seconds": round(sim_s, 1),
             "wall_seconds": round(wall, 1),
@@ -194,6 +278,17 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
                                  if steers else None),
             "steer_abs_max": (round(max(abs(v) for v in steers), 4)
                               if steers else None),
+            # Is the fly pointing where the road goes, and does it steer the
+            # way the error asks when it is not?
+            "heading_error_abs_median": (
+                round(statistics.median(abs(e) for e in errors), 1)
+                if errors else None),
+            "heading_error_abs_p90": (
+                round(sorted(abs(e) for e in errors)[int(len(errors) * 0.9)], 1)
+                if errors else None),
+            "steer_sign_agreement": (round(steer_agrees / steer_votes, 3)
+                                     if steer_votes else None),
+            "steer_sign_votes": steer_votes,
             "panic_frames": panic_frames,
             "pothole_frames": pothole_frames,
             "stall_peak_s": round(stall_peak, 1),
@@ -216,6 +311,31 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool) -> dict:
         }
 
 
+def _mean_closed(episodes: list[dict], which: str) -> float | None:
+    """Mean distance closed over the first or last third of the episodes.
+
+    Learning, if it happens at all here, is slow and noisy -- comparing
+    single episodes would mostly report traffic. Thirds are the smallest
+    summary that can show a trend without pretending to a precision a
+    handful of runs does not have.
+    """
+    if len(episodes) < 3:
+        return None
+    cut = max(1, len(episodes) // 3)
+    chunk = episodes[:cut] if which == "first" else episodes[-cut:]
+    return round(sum(e["closed_m"] for e in chunk) / len(chunk), 1)
+
+
+def _latlon(text: str) -> tuple[float, float]:
+    """"12.9177,77.6238" -> (12.9177, 77.6238)."""
+    lat, _, lon = text.partition(",")
+    try:
+        return float(lat), float(lon)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected LAT,LON (e.g. 12.9177,77.6238), got {text!r}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--max-minutes", type=float, default=60.0)
@@ -225,12 +345,29 @@ def main() -> int:
                     help="pace to wall clock; off by default so a long route "
                          "finishes in the time the hardware allows")
     ap.add_argument("--out", type=Path, default=None)
+    # Overrides for testing one kind of road at a time -- a straight run, a
+    # single turn, a street grid -- without editing config.yaml between
+    # runs. Omit both and the configured route stands.
+    ap.add_argument("--origin", type=_latlon, default=None,
+                    metavar="LAT,LON", help="override the route origin")
+    ap.add_argument("--dest", type=_latlon, default=None,
+                    metavar="LAT,LON", help="override the destination")
+    # Episodic training. The plastic overlay survives `reset_episode`, so
+    # repeated attempts at the same route are the only way the three-factor
+    # rule gets enough updates to move anything at learning_rate 1e-4.
+    ap.add_argument("--episodes", type=int, default=1,
+                    help="attempts at the route, weights carried between them")
+    ap.add_argument("--episode-minutes", type=float, default=0.0,
+                    help="cap on one attempt; 0 means run until arrival")
     args = ap.parse_args()
 
     from dipteran.config import load_config
 
     cfg = load_config()
-    result = run(cfg, args.max_minutes, args.progress_every, args.realtime)
+    result = run(cfg, args.max_minutes, args.progress_every, args.realtime,
+                 origin=args.origin, goal=args.dest,
+                 max_episodes=max(1, args.episodes),
+                 episode_minutes=args.episode_minutes)
     print("\n" + json.dumps(result, indent=2), flush=True)
 
     out = args.out or (cfg.paths.cache_dir / "route_run.json")

@@ -47,6 +47,7 @@ from dipteran.world import (  # noqa: E402
     looming_rate,
     proximity_scale,
     steering_drive,
+    traffic_speed_cap,
     wrap180,
 )
 
@@ -481,6 +482,38 @@ def test_looming_accelerates_when_nearer():
 def test_looming_guards_degenerate_input():
     assert looming_rate(10.0, 5.0, dt=0.0) == 0.0
     assert looming_rate(0.0, 5.0, dt=0.1) == 0.0
+
+
+# -- traffic-aware speed cap -----------------------------------------------
+# The complaint these exist for: 57.6 km/h across the Silk Board flyover is
+# not a thing that happens, while the same number on an empty inner road is
+# a ceiling nothing ever gets near.
+
+def test_speed_cap_is_the_lane_limit_on_an_empty_road():
+    """Nothing around: the lane's own limit is the only constraint."""
+    assert traffic_speed_cap(13.9, [], 3, 1.25, 2.8, 16.0) == 13.9
+
+
+def test_speed_cap_ignores_a_couple_of_neighbours():
+    """Two vehicles is traffic, not a jam. Below the threshold, no effect."""
+    assert traffic_speed_cap(11.1, [1.0, 1.0], 3, 1.25, 2.8, 16.0) == 11.1
+
+
+def test_speed_cap_follows_a_jam_down():
+    """Six neighbours at 4 m/s cap the fly at 5 m/s, not at the lane's 16."""
+    assert traffic_speed_cap(16.0, [4.0] * 6, 3, 1.25, 2.8, 16.0) == 5.0
+
+
+def test_speed_cap_floors_a_standstill():
+    """Gridlock slows the fly; it must not freeze it in place."""
+    assert traffic_speed_cap(16.0, [0.0] * 8, 3, 1.25, 2.8, 16.0) == 2.8
+
+
+def test_speed_cap_never_exceeds_the_vehicle_envelope():
+    """A motorway lane limit does not make the fly a motorway vehicle."""
+    assert traffic_speed_cap(30.0, [], 3, 1.25, 2.8, 16.0) == 16.0
+    # ...nor does a mis-set floor above the envelope.
+    assert traffic_speed_cap(30.0, [0.0] * 8, 3, 1.25, 25.0, 16.0) == 16.0
     assert looming_rate(10.0, 0.0, dt=0.1) == 0.0
 
 
@@ -729,20 +762,30 @@ def test_steering_drive_sign_goal_to_the_right():
     # cos(90 degrees) is 6.1e-17 rather than 0 in binary floating point, so
     # the off lobe is asserted against a tolerance. The sign is what matters
     # and it is exact: one lobe at full drive, the other at zero.
-    left, right = steering_drive(45.0)
+    # Asserted at the lobe width this formula was designed around, so the
+    # numbers stay the ones the docstring works through, and again at the
+    # configured default, so the crossing is checked at both widths.
+    left, right = steering_drive(45.0, 45.0)
     assert math.isclose(left, 1.0, rel_tol=1e-9), left
     assert math.isclose(right, 0.0, abs_tol=1e-12), right
     # ... and the mirror, so a sign flip in one lobe alone cannot pass.
-    left, right = steering_drive(-45.0)
+    left, right = steering_drive(-45.0, 45.0)
     assert math.isclose(left, 0.0, abs_tol=1e-12), left
     assert math.isclose(right, 1.0, rel_tol=1e-9), right
+
+    wide_left, wide_right = steering_drive(45.0)
+    assert wide_left > wide_right == 0.0, (wide_left, wide_right)
+    wide_left, wide_right = steering_drive(-45.0)
+    assert wide_right > wide_left == 0.0, (wide_left, wide_right)
 
 
 def test_steering_drive_is_balanced_dead_ahead():
     """Facing the goal produces equal lobes and therefore no net turn."""
     left, right = steering_drive(0.0)
     assert math.isclose(left, right), (left, right)
-    assert math.isclose(left, math.cos(math.radians(45.0)), rel_tol=1e-9)
+    left45, right45 = steering_drive(0.0, 45.0)
+    assert math.isclose(left45, math.cos(math.radians(45.0)), rel_tol=1e-9)
+    assert math.isclose(right45, left45, rel_tol=1e-9)
 
 
 def test_steering_drive_is_antisymmetric():
@@ -763,8 +806,39 @@ def test_steering_drive_dead_zone_behind():
     otherwise be injected as though it were a stimulus.
     """
     for error in (136.0, 150.0, 180.0, -180.0, -150.0, -136.0):
-        left, right = steering_drive(error)
+        left, right = steering_drive(error, 45.0)
         assert left == 0.0 and right == 0.0, (error, left, right)
+
+
+def test_steering_drive_default_width_still_steers_past_135():
+    """The 70-degree default keeps driving where the 45 pair gives up.
+
+    A fly pointing away from its route used to get no directional drive at
+    all past +/-135 and fell back to a constant -- measured live, a median
+    heading error of 122 degrees with the command positive on 95% of frames.
+    """
+    for error in (136.0, 150.0, 159.0):
+        left, right = steering_drive(error)
+        assert left > 0.0 and right == 0.0, (error, left, right)
+        mirror_left, mirror_right = steering_drive(-error)
+        assert mirror_right > 0.0 and mirror_left == 0.0, error
+        assert steering_drive(error, 45.0) == (0.0, 0.0), error
+
+
+def test_steering_drive_default_width_keeps_the_overlap():
+    """Dead ahead must drive *both* lobes, or left turns stop existing.
+
+    DNa02-left rests silent while DNa02-right runs at ~101 Hz, so a left
+    turn is DNa02-right pushed below its balanced baseline. Take the overlap
+    away -- a 90-degree half angle, where dead ahead is cos(90) = 0 on both
+    sides -- and there is no baseline to push below: measured at 90, the
+    command came out positive on 100% of frames, a fly that could only turn
+    right.
+    """
+    left, right = steering_drive(0.0)
+    assert math.isclose(left, right, rel_tol=1e-9)
+    assert left > 0.3, left
+    assert math.isclose(steering_drive(0.0, 90.0)[0], 0.0, abs_tol=1e-12)
     for error in range(-180, 181):
         left, right = steering_drive(float(error))
         assert left >= 0.0 and right >= 0.0, error
@@ -794,14 +868,19 @@ def test_steering_scaling_preserves_contrast():
     can no longer distinguish them. This asserts the injected contrast really
     does change between those two headings.
     """
-    ahead = [v * SENSORY_CEILING for v in steering_drive(0.0)]
-    hard_right = [v * SENSORY_CEILING for v in steering_drive(45.0)]
+    # Stated at the 45-degree lobe width, because the failure it documents
+    # is specific to that geometry: it is the width whose dead-ahead lobes
+    # (0.707/0.707) and hard-right lobes (1.0/0.0) both clip to the same
+    # 0.4. The wider default never puts two different headings on the same
+    # side of the ceiling, so it cannot show the bug at all.
+    ahead = [v * SENSORY_CEILING for v in steering_drive(0.0, 45.0)]
+    hard_right = [v * SENSORY_CEILING for v in steering_drive(45.0, 45.0)]
     assert ahead[0] != hard_right[0], (ahead, hard_right)
     assert math.isclose(ahead[0] - ahead[1], 0.0, abs_tol=1e-12)
     assert hard_right[0] - hard_right[1] > 0.3, hard_right
 
-    clipped_ahead = min(SENSORY_CEILING, steering_drive(0.0)[0])
-    clipped_right = min(SENSORY_CEILING, steering_drive(45.0)[0])
+    clipped_ahead = min(SENSORY_CEILING, steering_drive(0.0, 45.0)[0])
+    clipped_right = min(SENSORY_CEILING, steering_drive(45.0, 45.0)[0])
     assert clipped_ahead == clipped_right, (
         "if this ever differs, clipping became safe and this test is stale")
 

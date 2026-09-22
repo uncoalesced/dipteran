@@ -80,6 +80,12 @@ sumo:
   step_length: 0.1
   # null -> resolve netconvert via SUMO_HOME or PATH.
   binary_dir: null
+  # India drives on the left, and netconvert does not infer that from the
+  # extract's location -- left out, every vehicle including the fly runs on
+  # the wrong side of the road. Baked into the lane geometry at build time,
+  # so flipping this means deleting cache/bangalore.net.xml and
+  # cache/osm_sumo_edge_map.json and rebuilding both.
+  left_hand: true
 
 snn:
   # Excitability. This is the one number PHASE1_REPORT.md warned could not be
@@ -162,6 +168,42 @@ snn:
   pam_current_min: 0.05
   pam_current_max: 1.0
 
+  # Wrong-way punishment: PPL1 when the remaining *route* distance is
+  # growing, scaled up with distance from the goal. Before this the fly
+  # could drive away from its destination at full speed for free -- the
+  # only punishments were a 45-second stall, a pothole, and leaving the
+  # road network. threshold_ms separates real wrong-way movement from
+  # edge-snapping jitter; min/max bound the punishment high enough to
+  # trigger the escape response without drowning out every other channel.
+  wrong_way_threshold_ms: 0.5
+  wrong_way_smoothing: 0.05
+  wrong_way_min: 0.5
+  wrong_way_max: 0.8
+  # Two axes, so the punishment keeps grading instead of pinning at the
+  # ceiling: how far from the goal, and how fast it is getting worse.
+  wrong_way_full_m: 800.0
+  wrong_way_full_ms: 4.0
+  # Pulse, not level: a punishment held high depresses the motor pathway
+  # it is trying to correct (see navigator._reinforce). Measured with it
+  # held on, mean pain sat at 0.43 and the steering signal collapsed to
+  # zero-mean against a road that wanted a turn on 99% of frames. It now
+  # spikes, decays over wrong_way_pulse_s, and cannot spike again until
+  # wrong_way_refractory_s has passed.
+  # PFL3 lobe width in degrees, and both ends of this range were measured
+  # on live runs rather than reasoned about. At 45 the lobes clamp to zero
+  # past +/-135, so a fly pointing away from its route gets no steering
+  # drive and falls back to a constant -- median heading error 122 degrees,
+  # command positive on 95% of frames, circles. At 90 the lobes stop
+  # overlapping dead ahead, which is worse: DNa02-left rests silent, so a
+  # left turn means pushing DNa02-right below its balanced baseline, and
+  # with no overlap there is no baseline -- command positive on 100% of
+  # frames, a fly that can only turn right. 70 keeps the overlap and moves
+  # the dead zone out past 160 degrees.
+  steer_half_angle_deg: 70.0
+
+  wrong_way_pulse_s: 2.5
+  wrong_way_refractory_s: 10.0
+
 vehicle:
   # The boundary between two different quantities. MotorOutput.throttle is a
   # DNg02 *population firing rate* -- measured at 0.05-0.24, because
@@ -182,6 +224,10 @@ vehicle:
   # which turns 90 degrees in ~4.5 s and leaves headroom before the [-1, 1]
   # clamp.
   steer_scale: 10.0
+  # The envelope, not the speed anywhere in particular: 16 m/s is 57.6 km/h,
+  # and no stretch of this route should reach it unless the road is both
+  # fast and empty. What the fly is allowed at any given moment comes from
+  # the four traffic knobs below.
   max_speed_ms: 16.0
   max_accel_ms2: 2.5
   brake_ms2: 8.0
@@ -191,3 +237,49 @@ vehicle:
   # snapping the fly onto a lane, so it can still take wrong turns.
   edge_pull_per_s: 2.0
   pothole_density: 0.05
+
+  # Steering low-pass, seconds. DNa02 is a single neuron per side and one
+  # frame is five ticks, so the raw per-frame readout is noise: measured
+  # over a full run its sign matched the heading error 48.5% of the time.
+  # probe_diagnostics.py gets a clean +/-20 deg/s response out of the same
+  # decode by averaging 200 ticks; this recovers that resolution across
+  # frames instead, trading this many seconds of steering lag for it.
+  # 0 disables the filter.
+  steer_smoothing_s: 1.2
+  # The standing offset that gets subtracted from the filtered command, as
+  # a time constant in seconds. snn.steer_bias is calibrated with only the
+  # navigation channels driven; the live loop also injects odour, optic
+  # flow, looming, horn and PPL1, which move DNa02's resting asymmetry off
+  # that value -- on one measured run the fly held a rightward offset while
+  # the road went left for 95% of the frames. A slow average of the readout
+  # is that offset. Must stay well above steer_smoothing_s so a genuine
+  # sustained turn is not cancelled with it. 0 disables.
+  steer_bias_tau_s: 30.0
+  # ...and only re-estimated while the road is this close to dead ahead,
+  # where zero is known to be the right command. Without the gate the
+  # estimate eats sustained turns: on a stretch that demanded left for 100%
+  # of a two-minute window, an ungated average subtracted exactly the
+  # correction the fly needed.
+  steer_bias_window_deg: 10.0
+  # Seconds parked at the start of a run, both PFL3 lobes balanced, to
+  # measure that offset directly instead of inferring it from a fly that is
+  # already off heading. Skipping it orbited: the command came out positive
+  # on 98.4% of frames and the fly turned circles.
+  steer_calibration_s: 2.0
+  # Distance along the route to the steering target (pure pursuit). The
+  # earlier scheme aimed at the far end of the next edge, which on a
+  # 49-edge route through a one-way grid jumped every few seconds and took
+  # the bearing with it. Short values are twitchy, long ones cut corners.
+  route_lookahead_m: 45.0
+
+  # Speed cap from the road rather than from one global number. The lane's
+  # own SUMO speed limit is the ceiling; when at least traffic_min_vehicles
+  # neighbours sit within traffic_sample_m, their mean speed times
+  # traffic_speed_margin caps it further. Silk Board in gridlock therefore
+  # holds the fly to roughly the crawl everything around it is doing, while
+  # an empty inner road leaves it the full lane limit. Tune against how the
+  # traffic looks -- none of these four is measured.
+  traffic_sample_m: 80.0
+  traffic_min_vehicles: 3
+  traffic_speed_margin: 1.25
+  min_speed_cap_ms: 2.8

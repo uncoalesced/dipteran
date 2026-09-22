@@ -142,6 +142,12 @@ class Paths(BaseModel):
 class Sumo(BaseModel):
     step_length: float = Field(gt=0.0)
     binary_dir: Optional[Path] = None
+    # Left-hand traffic, as India drives. netconvert builds a right-hand
+    # network by default no matter where the OSM extract is from, so this
+    # has to be asked for explicitly -- and changing it means rebuilding
+    # `cache/bangalore.net.xml`, since the side of the road is baked into
+    # the lane geometry, not applied at runtime.
+    left_hand: bool = True
 
 
 class Vehicle(BaseModel):
@@ -163,6 +169,49 @@ class Vehicle(BaseModel):
     # Fraction of the off-road offset closed per second by the soft pull.
     edge_pull_per_s: float = Field(default=2.0, ge=0.0)
     pothole_density: float = Field(default=0.05, ge=0.0, le=1.0)
+
+    # Time constant of the steering low-pass, seconds. DNa02 is one neuron
+    # per side and a frame is five ticks, so the per-frame readout is mostly
+    # noise -- see the comment in `World.apply`. 0 disables the filter and
+    # restores the raw per-frame command.
+    steer_smoothing_s: float = Field(default=1.2, ge=0.0)
+    # Time constant of the standing-offset estimate subtracted from the
+    # steering command, seconds. Well above `steer_smoothing_s` so a real
+    # sustained turn survives it, well below a route so a drifting resting
+    # asymmetry does not. 0 disables it and leaves `snn.steer_bias` alone.
+    steer_bias_tau_s: float = Field(default=30.0, ge=0.0)
+    # The offset is only re-estimated while the heading error is inside
+    # this many degrees, because that is the condition where zero is known
+    # to be the right command. Wider makes the estimate faster and dirtier.
+    steer_bias_window_deg: float = Field(default=10.0, gt=0.0)
+    # Seconds spent parked at the start of a run measuring that offset
+    # directly, with both PFL3 lobes balanced so the readout carries
+    # nothing but the resting asymmetry. 0 skips the blink and trusts
+    # `snn.steer_bias` alone.
+    steer_calibration_s: float = Field(default=2.0, ge=0.0)
+    # How far along the route the steering target sits, metres. Too short
+    # and the bearing is noisy and twitchy; too long and the fly cuts
+    # corners across whatever sits between it and the target.
+    route_lookahead_m: float = Field(default=45.0, gt=0.0)
+
+    # `max_speed_ms` is the vehicle's envelope; these four turn it into the
+    # speed the *road* allows at this moment -- the lane's own limit, pulled
+    # down to what the surrounding traffic is actually doing. Unmeasured
+    # starting values: they are knobs to tune against how the traffic looks,
+    # not numbers off a dataset.
+    #
+    # Neighbours within this radius are "the traffic here".
+    traffic_sample_m: float = Field(default=80.0, gt=0.0)
+    # Fewer neighbours than this and there is no jam to speak of, so the
+    # lane's own limit stands unmodified.
+    traffic_min_vehicles: int = Field(default=3, ge=1)
+    # How much faster than the surrounding traffic the fly may travel. Above
+    # 1.0 because a fly-sized vehicle filters the way a two-wheeler does
+    # rather than queueing in lane.
+    traffic_speed_margin: float = Field(default=1.25, gt=0.0)
+    # Floor under the traffic cap: a standstill jam should still leave the
+    # fly picking its way through at walking pace, not frozen.
+    min_speed_cap_ms: float = Field(default=2.8, gt=0.0)
 
 
 class Snn(BaseModel):
@@ -225,6 +274,44 @@ class Snn(BaseModel):
     pam_current_min: float = Field(default=0.05, gt=0.0, le=1.0)
     pam_current_max: float = Field(default=1.0, gt=0.0, le=1.0)
 
+    # Wrong-way punishment. Driving away from the goal used to cost the fly
+    # nothing -- PPL1 only fired on a 45-second stall, a pothole, or leaving
+    # the road network -- so the one behaviour a navigator most needs to
+    # unlearn carried no teaching signal at all.
+    #
+    # `wrong_way_threshold_ms` is the rate of route-distance growth that
+    # counts as going the wrong way rather than as edge-snapping jitter;
+    # `wrong_way_smoothing` is the per-frame weight of the EMA that measures
+    # it. The punishment runs from `wrong_way_min` at the goal to
+    # `wrong_way_max` at `wrong_way_full_m` away and no higher -- high
+    # enough to trigger the escape response, bounded so it cannot drown out
+    # every other channel.
+    wrong_way_threshold_ms: float = Field(default=0.5, ge=0.0)
+    wrong_way_smoothing: float = Field(default=0.05, gt=0.0, le=1.0)
+    wrong_way_min: float = Field(default=0.5, ge=0.0, le=1.0)
+    wrong_way_max: float = Field(default=0.8, ge=0.0, le=1.0)
+    wrong_way_full_m: float = Field(default=800.0, gt=0.0)
+    # The other half of the grading: the rate of wrong-way travel that
+    # counts as getting it maximally wrong. Without this the punishment is
+    # binary on any route shorter than `wrong_way_full_m`.
+    wrong_way_full_ms: float = Field(default=4.0, gt=0.0)
+    # The punishment is a decaying pulse, not a level. Held continuously
+    # high it depresses the motor pathway it is meant to correct -- see
+    # `_reinforce` -- so it decays with this time constant and cannot
+    # re-fire until `wrong_way_refractory_s` has passed.
+    # Width of each PFL3 cosine lobe, degrees. 45 was the original pair and
+    # leaves a dead zone past +/-135, where a fly facing away from its route
+    # gets no directional drive and turns circles. 90 removes the dead zone
+    # but also removes the overlap dead ahead, and the overlap is what makes
+    # a left turn expressible at all -- DNa02-left rests silent, so left is
+    # "DNa02-right below its baseline", and without overlap there is no
+    # baseline. Measured at 90: a positive command on 100% of frames. 70
+    # keeps the overlap and pushes the dead zone past 160 degrees.
+    steer_half_angle_deg: float = Field(default=70.0, gt=0.0, lt=90.0)
+
+    wrong_way_pulse_s: float = Field(default=2.5, gt=0.0)
+    wrong_way_refractory_s: float = Field(default=10.0, gt=0.0)
+
     @model_validator(mode="after")
     def _reward_band_is_ordered(self) -> "Snn":
         if self.reward_near_m >= self.reward_far_m:
@@ -237,6 +324,12 @@ class Snn(BaseModel):
             raise ValueError(
                 f"pam_current_min ({self.pam_current_min}) must sit below "
                 f"pam_current_max ({self.pam_current_max})"
+            )
+        if self.wrong_way_min > self.wrong_way_max:
+            raise ValueError(
+                f"wrong_way_min ({self.wrong_way_min}) must sit at or below "
+                f"wrong_way_max ({self.wrong_way_max}); the punishment grows "
+                "with distance from the goal, it does not shrink"
             )
         return self
 

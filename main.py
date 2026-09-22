@@ -45,6 +45,25 @@ REPO = Path(__file__).parent
 HTML_CONTENT = (REPO / "index.html").read_text(encoding="utf-8")
 NOT_FOUND_HTML = (REPO / "404.html").read_text(encoding="utf-8")
 
+# Nothing ever told the loop to stop steering once it arrived. `rewards()`
+# only fires PAM on a *new* best distance (see world.py), so once the fly is
+# this close the progress signal it needs to hold a heading dries up and it
+# free-runs on whatever residual motor drive is left -- which looks like
+# circling the goal forever. 20 m: bigger than snn.progress_threshold_m
+# (12 m, so it doesn't fight the reward gate) and inside reward_near_m
+# (500 m), so it only ever triggers once actually there.
+ARRIVAL_RADIUS_M = 20.0
+
+# Joel's report: "it says there are 200 vehicles but I can see only 4 or 3
+# dots at once". The dots were capped here at 24 regardless of how many
+# `world.sense()` actually found nearby -- and until this session's
+# world.py change, it rarely found more than a handful anyway, because the
+# context subscription itself only reached 60 m (world.VISUAL_RADIUS_M is
+# 350 m now). 200 comfortably covers the whole background fleet at once;
+# kept as a cap rather than removed outright so a much bigger `background`
+# count later can't blow up the payload size unbounded.
+NEARBY_AGENTS_CAP = 200
+
 LIVE = os.environ.get("DIPTERAN_LIVE", "").strip().lower() in {"1", "true", "yes"}
 # One payload per 100 ms control frame; the page interpolates to 60 fps.
 STREAM_HZ = 10.0
@@ -234,7 +253,7 @@ class Simulation:
         from dipteran.connectome import build_adjacency, resolve_clusters
         from dipteran.navigator import (FlyBangaloreNavigator, MotorOutput,
                                         monoamine_rows, telemetry)
-        from dipteran.world import World
+        from dipteran.world import LOOM_FIELD_DEG, LOOM_RADIUS_M, World
 
         cfg = load_config()
 
@@ -263,6 +282,21 @@ class Simulation:
                 frame_started = time.perf_counter()
 
                 sensory = world.sense(frame_dt)
+
+                if world.state.distance_to_goal_m <= ARRIVAL_RADIUS_M:
+                    s = world.state
+                    self.latest = telemetry(
+                        MotorOutput(), lat=s.lat, lon=s.lon,
+                        heading=s.heading, speed_ms=0.0, throttle_cmd=0.0,
+                        edge=s.edge, nearby_agents=s.nearby[:NEARBY_AGENTS_CAP],
+                        pothole=False, horn=0.0, event="ARRIVED",
+                        fov_deg=LOOM_FIELD_DEG * 2.0, fov_radius_m=LOOM_RADIUS_M,
+                    )
+                    self.status = "arrived"
+                    print(f"[sim] arrived, {s.distance_to_goal_m:.1f} m "
+                          f"from goal", flush=True)
+                    break
+
                 pam, ppl1 = world.rewards()
                 # PAM and PPL1 are dopaminergic, so they are driven as
                 # external current here rather than through W -- their own
@@ -283,10 +317,15 @@ class Simulation:
                 self.latest = telemetry(
                     motor, lat=s.lat, lon=s.lon, heading=s.heading,
                     speed_ms=s.speed, throttle_cmd=s.throttle_cmd, edge=s.edge,
-                    nearby_agents=s.nearby[:24],
+                    nearby_agents=s.nearby[:NEARBY_AGENTS_CAP],
                     pothole=sensory["mechano_bristle"] > 0.0,
                     horn=sensory["acoustic_jo"],
                     event=self._event(motor, sensory, s),
+                    fov_deg=LOOM_FIELD_DEG * 2.0, fov_radius_m=LOOM_RADIUS_M,
+                    heading_error_deg=s.heading_error_deg,
+                    wrong_way_ms=s.wrong_way_ms,
+                    speed_cap_ms=world.speed_cap_ms,
+                    steer_filtered=s.steer_filtered,
                 )
 
                 # Hold real time if we are ahead of it; the bench measures

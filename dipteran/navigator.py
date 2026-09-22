@@ -559,12 +559,23 @@ def classify_state(out: MotorOutput, *, speed_ms: float, throttle_cmd: float,
 def telemetry(out: MotorOutput, *, lat: float, lon: float, heading: float,
               speed_ms: float, throttle_cmd: float, edge: str = "",
               nearby_agents=None, pothole: bool = False,
-              horn: float = 0.0, event: str | None = None) -> dict:
+              horn: float = 0.0, event: str | None = None,
+              fov_deg: float = 120.0, fov_radius_m: float = 60.0,
+              heading_error_deg: float = 0.0, wrong_way_ms: float = 0.0,
+              speed_cap_ms: float = 0.0, steer_filtered: float = 0.0) -> dict:
     """The JSON payload schema the HUD consumes.
 
     Extends the mock's fields rather than replacing them, so index.html's
     existing bindings keep working: lat/lon/heading/sugar_reward/pain_level/
     giant_fiber/event are all still here and still mean the same thing.
+
+    `fov_deg`/`fov_radius_m` describe the sensing cone the HUD draws in
+    front of the fly (Joel's "haze and highlight to show what the fly
+    sees"). Defaults are world.py's LOOM_FIELD_DEG doubled to a full angle
+    and LOOM_RADIUS_M -- the actual window `world.py._perceive` gates the
+    looming/horn channels on -- but main.py always passes the real values
+    explicitly so this is the fallback for any other caller, not the source
+    of truth.
     """
     title, caption = classify_state(out, speed_ms=speed_ms,
                                     throttle_cmd=throttle_cmd,
@@ -589,6 +600,22 @@ def telemetry(out: MotorOutput, *, lat: float, lon: float, heading: float,
         "spike_rate": round(out.spike_rate, 6),
         "regions": {k: round(v, 5) for k, v in out.regions.items()},
         "nearby_agents": nearby_agents or [],
+        "fov_deg": fov_deg,
+        "fov_radius_m": fov_radius_m,
+        # -- Phase 3 additions, all three watchable live ------------------
+        # Signed degrees from the fly's nose to the route target: the number
+        # that says whether the compass is right, next to `steer`, which
+        # says whether the brain is acting on it.
+        "heading_error_deg": round(heading_error_deg, 1),
+        # Positive when the remaining route distance is growing -- what the
+        # wrong-way punishment reads.
+        "wrong_way_ms": round(wrong_way_ms, 2),
+        # What the road and its traffic allow right now, as opposed to the
+        # vehicle's absolute envelope.
+        "speed_cap_ms": round(speed_cap_ms, 2),
+        # What the vehicle actually steers on: `steer` above is one frame of
+        # a one-neuron-per-side readout, this is that readout low-passed.
+        "steer_filtered": round(steer_filtered, 4),
     }
 
 

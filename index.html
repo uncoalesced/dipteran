@@ -148,6 +148,29 @@
         </div>
       </div>
 
+      <!-- Navigation readout: the numbers that say whether a run is
+           working, rather than whether it is moving. Compass error is how
+           far off the road's direction the fly points, steer is what the
+           brain does about it, and the cap is what the traffic allows. -->
+      <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] font-mono border-t border-neutral-800 pt-2">
+        <div class="flex justify-between">
+          <span class="text-neutral-400">Compass err</span>
+          <span id="nav-error" class="text-neutral-200 tabular-nums">0&deg;</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-neutral-400">Steer</span>
+          <span id="nav-steer" class="text-neutral-200 tabular-nums">0.000</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-neutral-400">Speed cap</span>
+          <span id="nav-cap" class="text-neutral-200 tabular-nums">-- m/s</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-neutral-400">Wrong way</span>
+          <span id="nav-wrong" class="text-neutral-200 tabular-nums">0.0 m/s</span>
+        </div>
+      </div>
+
       <div class="mt-1">
         <span class="text-[10px] uppercase font-mono tracking-wider text-neutral-500">Neural Event Log</span>
         <div id="terminal" class="h-28 overflow-y-auto font-mono text-[11px] text-neutral-300 flex flex-col-reverse gap-1 mt-1 bg-black/50 p-2 rounded border border-neutral-900">
@@ -198,19 +221,102 @@
 
     // Background SUMO traffic as a GeoJSON layer, so hundreds of agents cost
     // one source update per frame rather than hundreds of DOM markers.
+    //
+    // Colour and size are keyed off `type` -- a cosmetic classification
+    // world.py now assigns each background vehicle at spawn (BG_VEHICLE_TYPES
+    // there), not a real SUMO vehicle class. Joel: "these dots need to be
+    // properly categorized" -- trucks brown, autos yellow, cars blue/red,
+    // bikes orange.
+    const TRAFFIC_COLOR = [
+      'match', ['get', 'type'],
+      'truck', '#a0602c',
+      'auto', '#eab308',
+      'car_blue', '#3b82f6',
+      'car_red', '#ef4444',
+      'bike', '#f97316',
+      /* default */ '#8899a6'
+    ];
+    const TRAFFIC_RADIUS = [
+      'match', ['get', 'type'],
+      'truck', 5,
+      'auto', 3.2,
+      'car_blue', 3.6,
+      'car_red', 3.6,
+      'bike', 2.4,
+      /* default */ 3
+    ];
+
+    // The fov (field-of-view) source draws the "haze and highlight" cone in
+    // front of the fly -- Joel: "a small, slight haze and highlight to show
+    // what the fly sees". It is recomputed client-side every frame from the
+    // fly's own lat/lon/heading plus the backend's fov_deg/fov_radius_m
+    // (world.py's LOOM_FIELD_DEG*2 and LOOM_RADIUS_M -- the exact window the
+    // SNN's looming/horn channels are gated on, so the cone shown is the
+    // cone that is actually true, not just decorative).
+    const EMPTY_FC = { type: 'FeatureCollection', features: [] };
+
     map.on('load', () => {
-      map.addSource('traffic', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addSource('fov', { type: 'geojson', data: EMPTY_FC });
+      map.addLayer({
+        id: 'fov-fill', type: 'fill', source: 'fov',
+        paint: { 'fill-color': '#5eead4', 'fill-opacity': 0.10 }
+      });
+      map.addLayer({
+        id: 'fov-outline', type: 'line', source: 'fov',
+        paint: { 'line-color': '#5eead4', 'line-opacity': 0.4, 'line-width': 1 }
+      });
+
+      map.addSource('traffic', { type: 'geojson', data: EMPTY_FC });
       map.addLayer({
         id: 'traffic', type: 'circle', source: 'traffic',
         paint: {
-          'circle-radius': 3,
-          'circle-color': '#8899a6',
-          'circle-opacity': 0.75,
+          'circle-radius': TRAFFIC_RADIUS,
+          'circle-color': TRAFFIC_COLOR,
+          // Haziest at the edge of what the fly can sense, brightest close
+          // in -- the same "highlight what it sees" idea as the fov cone,
+          // applied to the dots themselves. `dist` is metres from the fly,
+          // sent per-vehicle by world.py's _perceive.
+          'circle-opacity': [
+            'interpolate', ['linear'], ['coalesce', ['get', 'dist'], 0],
+            0, 0.95,
+            60, 0.8,
+            350, 0.3
+          ],
           'circle-stroke-width': 0.5,
           'circle-stroke-color': '#0b0e11'
         }
       });
     });
+
+    function offsetLatLon(lat, lon, bearingDeg, distM) {
+      const rad = bearingDeg * Math.PI / 180;
+      const dLat = (distM * Math.cos(rad)) / 111320;
+      const dLon = (distM * Math.sin(rad)) /
+        (111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
+      return [lon + dLon, lat + dLat];
+    }
+
+    // A filled wedge (fan) from the fly's position out to fovRadiusM, spanning
+    // fovDeg centred on heading -- not a full circle, because the point is to
+    // show the *forward* sensing cone the looming detectors actually watch,
+    // per LOOM_FIELD_DEG in world.py.
+    function fovPolygon(lat, lon, headingDeg, fovDeg, radiusM) {
+      const half = fovDeg / 2, steps = 24;
+      const ring = [[lon, lat]];
+      for (let i = 0; i <= steps; i++) {
+        const bearing = headingDeg - half + (fovDeg * i / steps);
+        ring.push(offsetLatLon(lat, lon, bearing, radiusM));
+      }
+      ring.push([lon, lat]);
+      return {
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          geometry: { type: 'Polygon', coordinates: [ring] },
+          properties: {}
+        }]
+      };
+    }
 
     // ---------------------------------------------------------------
     // Brain point cloud
@@ -513,6 +619,10 @@
     const term = document.getElementById('terminal');
     const barPain = document.getElementById('bar-pain');
     const barPanic = document.getElementById('bar-panic');
+    const navError = document.getElementById('nav-error');
+    const navSteer = document.getElementById('nav-steer');
+    const navCap = document.getElementById('nav-cap');
+    const navWrong = document.getElementById('nav-wrong');
     const badge = document.getElementById('badge');
     const stateTitle = document.getElementById('state-title');
     const stateCaption = document.getElementById('state-caption');
@@ -595,6 +705,33 @@
       barPain.style.width = `${data.pain_level * 100}%`;
       barPanic.style.width = `${data.giant_fiber * 100}%`;
 
+      // Compass error and steer are shown side by side on purpose: a large
+      // error with steer of the matching sign is the fly correcting, the
+      // same error with steer of the wrong sign is it not.
+      if (typeof data.heading_error_deg === 'number') {
+        const err = data.heading_error_deg;
+        navError.textContent = `${err > 0 ? '+' : ''}${err.toFixed(0)}°`;
+        navError.className = 'tabular-nums ' + (Math.abs(err) <= 20
+          ? 'text-emerald-400' : Math.abs(err) <= 60
+          ? 'text-amber-400' : 'text-red-400');
+      }
+      // The filtered readout, because that is the one the vehicle turns on;
+      // the raw per-frame `steer` is five ticks of a single neuron.
+      if (typeof data.steer_filtered === 'number' || typeof data.steer === 'number') {
+        const sv = typeof data.steer_filtered === 'number'
+          ? data.steer_filtered : data.steer;
+        navSteer.textContent = (sv > 0 ? '+' : '') + sv.toFixed(3);
+      }
+      if (typeof data.speed_cap_ms === 'number') {
+        navCap.textContent = `${data.speed_cap_ms.toFixed(1)} m/s`;
+      }
+      if (typeof data.wrong_way_ms === 'number') {
+        const w = data.wrong_way_ms;
+        navWrong.textContent = `${w > 0 ? '+' : ''}${w.toFixed(1)} m/s`;
+        navWrong.className = 'tabular-nums ' + (w > 0.5
+          ? 'text-red-400' : 'text-neutral-200');
+      }
+
       if (data.state) stateTitle.textContent = data.state;
       if (data.caption) stateCaption.textContent = data.caption;
       if (typeof data.dopamine === 'number') {
@@ -623,9 +760,15 @@
           features: (data.nearby_agents || []).map(a => ({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [a.lon, a.lat] },
-            properties: { id: a.id }
+            properties: { id: a.id, type: a.type || 'car_blue', dist: a.dist || 0 }
           }))
         });
+      }
+
+      if (map.getSource('fov')) {
+        map.getSource('fov').setData(
+          fovPolygon(data.lat, data.lon, data.heading,
+                     data.fov_deg || 120, data.fov_radius_m || 60));
       }
 
       if (data.event) log(data.event);

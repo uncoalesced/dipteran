@@ -62,6 +62,49 @@ LOOM_FIELD_DEG = 60.0        # forward half-field the looming detectors watch
 HORN_RADIUS_M = 15.0
 VEHICLE_WIDTH_M = 1.8
 
+# `LOOM_RADIUS_M` is what the SNN's looming/horn tuning was actually measured
+# against -- it is the old context-subscription radius, kept exactly as it
+# was so bug #3's panic-reflex fix (this session) is not disturbed by the
+# change below. `VISUAL_RADIUS_M` is a second, much wider number purely for
+# what the HUD draws: Joel's report was "it says 200 vehicles but I only see
+# 3 or 4 dots", and the reason was that the context subscription itself only
+# ever asked SUMO for vehicles within 60 m, so nothing further out existed to
+# draw regardless of how many were simulated. Sensing radius and draw radius
+# are deliberately two different numbers now; `_perceive` gates the SNN
+# channels on the small one and the telemetry list on the large one.
+LOOM_RADIUS_M = 60.0
+VISUAL_RADIUS_M = 350.0
+
+# How many frames to wait before asking SUMO again for a route it has
+# already refused from this edge. At 10 Hz this is five seconds. A refusal
+# means Dijkstra searched the whole reachable component and found nothing,
+# which is the expensive direction of that call, so it is not worth
+# retrying every frame -- but it has to be retried, because the fly can sit
+# on such an edge indefinitely.
+ROUTE_RETRY_FRAMES = 50
+
+def balanced_pfl3(half_angle_deg: float) -> float:
+    """What both lobes read with the goal dead ahead, for a given lobe width.
+
+    `steering_drive(0)` puts cos(half_angle) on each side, so this is the
+    balanced operating point: the drive that asks for no turn at all. The
+    calibration blink in `World.apply` injects it on both lobes, and
+    `scripts/probe_diagnostics.py` measures `snn.steer_bias` at the same
+    point. It moves with the lobe width, which is why it is computed rather
+    than written down -- at the 90-degree default it is zero.
+    """
+    return math.cos(math.radians(half_angle_deg))
+
+# Cosmetic-only classification for the map's traffic dots -- every background
+# vehicle keeps the same SUMO vClass and routing regardless of its assigned
+# type, so this can never change what the simulation actually does, only
+# what colour dot the HUD draws for it. The weights are an unmeasured guess
+# at a Bangalore-ish mix (heavy two-wheeler and auto-rickshaw share, few
+# trucks) -- there is no dataset behind these numbers, they only exist to
+# beat "every vehicle on the map is the same grey dot".
+BG_VEHICLE_TYPES = ("bike", "auto", "car_blue", "car_red", "truck")
+BG_VEHICLE_WEIGHTS = (0.32, 0.28, 0.15, 0.15, 0.10)
+
 # Ceiling on any single injected sensory current. `calibrate_gain` was run at
 # drive=0.4 and its docstring explains why the value is deliberately below
 # `v_thresh`: at threshold a clamped row fires every sub-tick, which is a
@@ -117,7 +160,35 @@ def looming_rate(prev_dist: float, dist: float, dt: float,
     return max(0.0, (theta_now - theta_prev) / dt)
 
 
-def steering_drive(error_deg: float, half_angle_deg: float = 45.0
+def traffic_speed_cap(lane_limit_ms: float, peer_speeds: list[float],
+                      min_vehicles: int, margin: float,
+                      floor_ms: float, ceiling_ms: float) -> float:
+    """How fast the fly may go *here*, from the lane and its traffic.
+
+    One global top speed is wrong in both directions on this map: 57.6 km/h
+    through the Silk Board jam is physically impossible, and the same number
+    on an empty inner road is a ceiling nothing ever approaches. The lane's
+    own SUMO speed limit covers the second case; the mean speed of the
+    vehicles around the fly covers the first, because a jam *is* its
+    neighbours moving slowly.
+
+    `margin` is above 1.0 deliberately -- a fly-sized vehicle filters
+    through stopped traffic the way a two-wheeler does rather than queueing
+    in lane -- and `floor_ms` stops a full standstill pinning it at zero,
+    which would make a jam an inescapable trap instead of slow going.
+
+    Pure: no traci, no state. `World._speed_cap` supplies the arguments.
+    """
+    ceiling = max(0.0, ceiling_ms)
+    cap = min(lane_limit_ms, ceiling)
+    if len(peer_speeds) >= min_vehicles:
+        cap = min(cap, (sum(peer_speeds) / len(peer_speeds)) * margin)
+    # The floor is held under the ceiling too, so a mis-set floor can never
+    # hand out more speed than the vehicle's envelope allows.
+    return max(min(floor_ms, ceiling), min(cap, ceiling))
+
+
+def steering_drive(error_deg: float, half_angle_deg: float = 70.0
                    ) -> tuple[float, float]:
     """Signed heading error -> (PFL3-left drive, PFL3-right drive).
 
@@ -145,6 +216,22 @@ def steering_drive(error_deg: float, half_angle_deg: float = 45.0
         error = +45 (goal to the right) -> left lobe 1.0, right lobe 0.0
         error =   0 (dead ahead)        -> both 0.707, no net turn
         error = 180 (behind)            -> both 0.0, the dead zone
+
+    That dead zone is why `half_angle_deg` is configurable and why
+    `snn.steer_half_angle_deg` defaults to 70 rather than 45. At 45 a fly
+    pointing more than 135 degrees off its route gets no steering drive at
+    all and the readout falls back to a constant: measured live, a median
+    heading error of 122 degrees with a positive command on 95% of frames,
+    which is a fly facing away from the road turning slow circles.
+
+    The width cannot simply go to 90. The lobes must *overlap* dead ahead,
+    because DNa02-left rests silent while DNa02-right runs at ~101 Hz (see
+    `navigator._decode`), so a left turn is expressed by pushing DNa02-right
+    below its balanced baseline -- and at 90 degrees the off lobe receives
+    zero drive, leaving no baseline to push below. Measured at 90: the
+    command was positive on 100% of frames, a fly that could physically only
+    turn right. 70 keeps a real balanced drive dead ahead (cos 70 = 0.34)
+    while pushing the dead zone out past 160 degrees.
     """
     right_of_nose = max(0.0, math.cos(math.radians(error_deg - half_angle_deg)))
     left_of_nose = max(0.0, math.cos(math.radians(error_deg + half_angle_deg)))
@@ -196,8 +283,34 @@ class VehicleState:
     edge: str = ""
     off_road_m: float = 0.0
     distance_to_goal_m: float = 0.0
+    # Position along `edge`, metres from its start -- what `_edge_at` already
+    # returns and previously threw away. `_update_route` needs it to know how
+    # far into the current edge the fly already is, so the route-remaining
+    # estimate doesn't jump by a whole edge length the instant it enters one.
+    edge_pos: float = 0.0
+    # Remaining distance to the goal *along the road network* SUMO knows
+    # about, not the crow-flies line `distance_to_goal_m` is. Falls back to
+    # `distance_to_goal_m` whenever no route can be found (see
+    # `_route_distance_m`). This is what `rewards()` now gates progress on --
+    # see the comment there for why the crow-flies distance could not do that
+    # job on its own.
+    route_distance_to_goal_m: float = 0.0
     travelled_m: float = 0.0
     stalled_s: float = 0.0
+    # Signed degrees from the fly's heading to the route target, as `sense`
+    # last computed it. Recorded rather than recomputed because it is the
+    # one number that separates "the compass is wrong" from "the compass is
+    # right and the brain is not turning": a run with a large standing
+    # error and no matching steer is a motor problem, the same run with a
+    # small error is not.
+    heading_error_deg: float = 0.0
+    # Smoothed rate at which the remaining route distance is *growing*,
+    # m/s. Positive means driving away from the goal; `rewards()` punishes
+    # it, and the HUD shows it.
+    wrong_way_ms: float = 0.0
+    # The time-averaged steering readout the vehicle actually acts on, as
+    # opposed to the single-frame `MotorOutput.steer` it is filtered from.
+    steer_filtered: float = 0.0
     # The *scaled* throttle command, [0, 1] -- not MotorOutput.throttle,
     # which is a firing rate in roughly [0.05, 0.24]. Keeping the command
     # here rather than passing it around is what stops the two being
@@ -241,12 +354,82 @@ class World:
         self.state = VehicleState(lat=self.origin[0], lon=self.origin[1])
         self.state.heading = bearing_deg(*self.origin, *self.goal)
         self.state.distance_to_goal_m = haversine_m(*self.origin, *self.goal)
+        self.state.route_distance_to_goal_m = self.state.distance_to_goal_m
         self.best_distance_m = self.state.distance_to_goal_m
 
         self._prev_dist: dict[str, float] = {}
         self._ego_xy: tuple[float, float] | None = None
+        self._bg_category: dict[str, str] = {}
+
+        # Road-network routing state -- see `_update_route` and
+        # `_route_target`. `_goal_edge` is resolved once here: the goal never
+        # moves during a run, so there is no reason to ask SUMO the same
+        # nearest-edge question about it every frame the way `_edge_at` does
+        # for the fly's own constantly-changing position.
+        # Same junction problem as the spawn: a goal that snaps to an
+        # internal edge is not a routable endpoint, so `findRoute` finds
+        # nothing and every frame falls back to the bee-line.
+        self._goal_edge, _pos, _lane = self._road_edge_near(*self.goal)
+        self._route_edge: str | None = None
+        self._route_edges: list[str] = []
+        self._route_length_m: float | None = None
+        self._route_anchor_pos: float = 0.0
+        self._route_retry: int = 0
+        self._lane_shapes: dict[str, list | None] = {}
+        # Wrong-way detection state -- see the punishment branch in
+        # `rewards()`. Seeded from the starting route distance so the first
+        # frame reads zero movement rather than the whole route's length.
+        self._prev_route_m: float = self.state.route_distance_to_goal_m
+        self._away_ema: float = 0.0
+        self._wrong_way_pulse: float = 0.0
+        self._wrong_way_cooldown: float = 0.0
+
+        # Lane speed limit of the edge the fly is on, cached because it only
+        # changes when the edge does -- see `_speed_cap`.
+        self._lane_limit_edge: str | None = None
+        self._lane_limit_ms: float = self.v.max_speed_ms
+        # Last value `_speed_cap` produced, for telemetry.
+        self.speed_cap_ms: float = self.v.max_speed_ms
+        # Fast and slow running averages of the steering readout -- see
+        # `apply`. The fast one is the command; the slow one is the standing
+        # offset subtracted from it.
+        self._steer_filtered: float = 0.0
+        self._steer_rest: float = 0.0
+        # Calibration blink state -- see `apply`.
+        self._balanced_pfl3: float = balanced_pfl3(
+            self.cfg.snn.steer_half_angle_deg)
+        self._calibrating: int = int(self.v.steer_calibration_s
+                                     / max(self.step_length, 1e-3))
+        self._calibrate_sum: float = 0.0
+        self._calibrate_n: int = 0
+
         self._spawn_background(background)
         self._spawn_ego()
+
+        # Now that the ego has a resolved starting edge, an initial route can
+        # be found, and `best_distance_m` -- the ratchet `rewards()` compares
+        # against -- should start from the same quantity `rewards()` will
+        # compare against later, not from the crow-flies distance that quantity
+        # is deliberately no longer always equal to.
+        self._update_route()
+        route_m = self._route_distance_m()
+        if route_m is not None:
+            self.state.route_distance_to_goal_m = route_m
+            self.best_distance_m = route_m
+        # Seeded here rather than above, because the route distance found
+        # above is usually much larger than the crow-flies distance the
+        # state carried before it: reading the difference as a frame's worth
+        # of movement would punish the fly for existing.
+        self._prev_route_m = self.state.route_distance_to_goal_m
+        # The one line that tells "routing works" apart from "routing
+        # silently fell back to the bee-line" -- from outside they look
+        # identical, because both just steer at something.
+        print(f"[route] goal edge {self._goal_edge or 'UNRESOLVED'}, "
+              f"start edge {self.state.edge or 'UNRESOLVED'}, "
+              f"{len(self._route_edges)} edges, "
+              f"{'no route' if route_m is None else format(route_m, '.0f') + ' m'}"
+              f" along route (crow-flies "
+              f"{self.state.distance_to_goal_m:.0f} m)", flush=True)
 
     # -- lifecycle -------------------------------------------------------
 
@@ -342,16 +525,57 @@ class World:
                 self.traci.vehicle.add(f"bg_{i}", f"bg_r{i}",
                                        departLane="best", departSpeed="max")
                 self.traci.vehicle.changeTarget(f"bg_{i}", dst)
+                # Cosmetic type, not a SUMO vType -- see BG_VEHICLE_WEIGHTS.
+                # Drawn from `rng`, the same seeded stream everything else in
+                # this method uses, so the mix is deterministic per seed like
+                # the rest of the spawn.
+                self._bg_category[f"bg_{i}"] = rng.choices(
+                    BG_VEHICLE_TYPES, weights=BG_VEHICLE_WEIGHTS)[0]
                 self.background += 1
             except Exception:
                 continue
 
+    def _road_edge_near(self, lat: float, lon: float
+                        ) -> tuple[str, float, int]:
+        """Nearest *normal* edge, searching outward if the point lands in a
+        junction.
+
+        `_edge_at` answers with whatever edge is nearest, and inside a
+        junction that is an internal edge (`:cluster_...`). Internal edges
+        are not places a vehicle can be inserted: SUMO does not reject the
+        attempt, it aborts the process --
+
+            sumo: ./src/microsim/MSVehicle.cpp:6002:
+            void MSVehicle::updateBestLanes(bool, const MSLane*):
+            Assertion `false' failed.
+
+        -- and takes the whole simulation with it. Since the origin and the
+        goal both come from a click on a map, a click that lands on any of
+        this network's junctions would otherwise kill the run, which is why
+        this searches instead of trusting the first answer.
+        """
+        edge, pos, lane = self._edge_at(lat, lon)
+        if edge and not edge.startswith(":"):
+            return edge, pos, lane
+        lat_per_m = 1.0 / 111_320.0
+        lon_per_m = lat_per_m / max(0.2, math.cos(math.radians(lat)))
+        for radius in (10.0, 20.0, 35.0, 60.0):
+            for bearing in range(0, 360, 30):
+                rad = math.radians(bearing)
+                edge, pos, lane = self._edge_at(
+                    lat + radius * math.cos(rad) * lat_per_m,
+                    lon + radius * math.sin(rad) * lon_per_m)
+                if edge and not edge.startswith(":"):
+                    return edge, pos, lane
+        return "", 0.0, 0
+
     def _spawn_ego(self) -> None:
         traci = self.traci
-        edge, _pos, _lane = self._edge_at(*self.origin)
+        edge, pos, _lane = self._road_edge_near(*self.origin)
         if not edge:
             raise RuntimeError("origin does not resolve to any SUMO edge")
         self.state.edge = edge
+        self.state.edge_pos = pos
         traci.route.add(EGO_ROUTE, [edge])
         traci.vehicle.add(EGO_ID, EGO_ROUTE, departLane="best")
         traci.vehicle.setSpeedMode(EGO_ID, 0)      # the SNN drives, not Krauss
@@ -360,8 +584,12 @@ class World:
             self._ego_xy = traci.vehicle.getPosition(EGO_ID)
         except Exception:
             self._ego_xy = None
+        # VISUAL_RADIUS_M, not LOOM_RADIUS_M: this one subscription result
+        # feeds both the SNN's sensing (`_perceive` re-filters down to
+        # LOOM_RADIUS_M for that) and the HUD's traffic dots, and the dots
+        # are the one that needed to see further than the old 60 m.
         traci.vehicle.subscribeContext(
-            EGO_ID, traci.constants.CMD_GET_VEHICLE_VARIABLE, 60.0,
+            EGO_ID, traci.constants.CMD_GET_VEHICLE_VARIABLE, VISUAL_RADIUS_M,
             [traci.constants.VAR_POSITION, traci.constants.VAR_SPEED,
              traci.constants.VAR_ANGLE])
 
@@ -372,19 +600,56 @@ class World:
         s = self.state
         s.distance_to_goal_m = haversine_m(s.lat, s.lon, *self.goal)
 
+        # Bug report (Joel, this session): close to the goal, the fly would
+        # just try to cross straight through whatever wall or building sat
+        # between it and the destination. The cause was that `error` below
+        # used to be measured against the goal's raw lat/lon -- a compass
+        # bearing has no notion that roads exist, so it pointed the same way
+        # whether or not anything was drivable in that direction. The fly was
+        # never "confused"; the sensory current genuinely carried no
+        # information about the road network at all, so there was nothing for
+        # the SNN's existing trial-and-error learning to act on except "keep
+        # pushing this way".
+        #
+        # `_update_route`/`_route_target` fix that by asking SUMO -- which
+        # already has the whole road graph loaded for its own routing -- for
+        # the shortest path from the fly's current edge to the goal edge, and
+        # steering the compass at the far end of the next edge on that path
+        # instead of at the goal itself. That bearing can only ever point down
+        # a real road. The fly still has to *learn* to follow it through the
+        # same reward-driven trial and error as everything else here -- this
+        # only fixes what the compass is allowed to say, not who acts on it.
+        self._update_route()
+        route_m = self._route_distance_m()
+        s.route_distance_to_goal_m = (route_m if route_m is not None
+                                      else s.distance_to_goal_m)
+        target_lat, target_lon = self._route_target()
+
         # Odour beacon: PLAN.md's inverse gradient, normalised so it saturates
         # within smelling distance of the goal rather than blowing up to
-        # infinity on arrival.
+        # infinity on arrival. Left on the true crow-flies distance -- a real
+        # plume is carried by air, not roads, so it is fine (correct, even)
+        # for this channel to still smell the goal directly through a wall.
+        # It is only ever used as a magnitude here, never a direction.
         odour = min(1.0, 500.0 / max(s.distance_to_goal_m, 1.0))
 
-        # Sun compass: EPG drive peaks when the fly faces the goal. Kept
-        # unchanged -- it is a real alignment signal and Phase 2 validated the
-        # behaviour built on it -- but it is even in `error` and so carries no
-        # turn direction at all. The signed half of the compass is the PFL3
-        # pair below; this scalar stays as the "how aligned am I" channel.
-        error = wrap180(bearing_deg(s.lat, s.lon, *self.goal) - s.heading)
+        # Sun compass: EPG drive peaks when the fly faces the *route target*
+        # now, not the goal directly -- see the routing comment above. Still
+        # even in `error` and so still carries no turn direction on its own;
+        # the signed half is the PFL3 pair below, this scalar stays the "how
+        # aligned am I with where I should be heading" channel.
+        error = wrap180(bearing_deg(s.lat, s.lon, target_lat, target_lon)
+                        - s.heading)
+        s.heading_error_deg = error
         compass = max(0.0, math.cos(math.radians(error)))
-        pfl3_left, pfl3_right = steering_drive(error)
+        if self._calibrating > 0:
+            # Calibration blink -- see `apply`. Both lobes get the balanced
+            # drive `steering_drive(0)` would produce, so the readout during
+            # these frames is the resting asymmetry and nothing else.
+            pfl3_left = pfl3_right = self._balanced_pfl3
+        else:
+            pfl3_left, pfl3_right = steering_drive(
+                error, self.cfg.snn.steer_half_angle_deg)
 
         # Optic flow: what the fly is *actually* achieving, not what it asked
         # for. Zero flow with the throttle open is the gridlock signal.
@@ -431,6 +696,178 @@ class World:
             "mechano_bristle": 1.0 if pothole else 0.0,
         }
 
+    def _update_route(self) -> None:
+        """Recompute the road-network path to the goal, when the fly's
+        current edge has changed since the last time this ran.
+
+        SUMO already holds the whole graph in the running process for its
+        own routing, so asking it for a path is one more cheap traci call --
+        `findRoute` runs Dijkstra over the graph SUMO has anyway, and does
+        not touch the 862 MB network XML this module's whole design goes out
+        of its way to avoid parsing a second time (see the module docstring).
+        """
+        edge = self.state.edge
+        if not edge or edge.startswith(":"):
+            # No resolved edge yet, or mid-junction on an internal edge --
+            # those aren't routable endpoints.
+            return
+        if edge == self._route_edge:
+            # Nothing has changed since the last attempt, so normally there
+            # is no question to ask again. The exception is an attempt that
+            # *failed*: the fly is then parked on an edge SUMO can't route
+            # from, and since it is barely moving (see below) the edge won't
+            # change on its own either. Asking again on a timer is the only
+            # way back out.
+            if self._route_length_m is not None:
+                return
+            self._route_retry -= 1
+            if self._route_retry > 0:
+                return
+        self._route_retry = ROUTE_RETRY_FRAMES
+        self._route_edge = edge
+        if not self._goal_edge:
+            return
+        try:
+            stage = self.traci.simulation.findRoute(edge, self._goal_edge)
+            if stage.edges:
+                self._route_edges = list(stage.edges)
+                self._route_length_m = stage.length
+                self._route_anchor_pos = self.state.edge_pos
+                self._no_route_frames = 0
+            else:
+                self._route_failed(edge, "findRoute returned no path")
+        except Exception as exc:
+            # A disconnected component, or SUMO briefly not ready.
+            self._route_failed(edge, f"{type(exc).__name__}: {exc}")
+
+    def _route_failed(self, edge: str, why: str) -> None:
+        """No path from here -- keep the last road target, drop the length.
+
+        The obvious fallback, and the one this had first, is to steer at the
+        goal again. That turned out to be the bug: a bee-line target sits on
+        the far side of whatever building is in the way, the heading locks
+        onto it, and `_pull_to_road` then cancels most of each step, so the
+        fly hovers in place staring at the goal. Joel watched it do exactly
+        that -- 0.8 m/s of realised motion against 4.3 m/s of commanded
+        speed, on an edge whose `findRoute` had just returned nothing.
+
+        Keeping the stale `_route_edges` instead aims it at the last road it
+        could route from, which is behind it and reachable, so it drives
+        back onto the connected network and the next `findRoute` succeeds.
+
+        `_route_length_m` is dropped either way: a length measured from an
+        edge the fly has left is not a distance `rewards()` can gate
+        progress on, so that one falls back to crow-flies, as before.
+        """
+        self._route_length_m = None
+        self._warn_no_route(edge, why)
+
+    def _warn_no_route(self, edge: str, why: str) -> None:
+        """Print the first fallback-to-bee-line per run, then stay quiet.
+
+        Falling back is by design and can happen on a lot of consecutive
+        frames; a print per frame at 10 Hz would bury the log. One line is
+        enough to answer the only question worth asking -- did the road
+        route ever fail -- so the counter is reported at the end instead.
+        """
+        self._no_route_frames = getattr(self, "_no_route_frames", 0) + 1
+        if self._no_route_frames == 1:
+            print(f"[route] no road route from {edge} to "
+                  f"{self._goal_edge}: {why} -- steering bee-line until it "
+                  f"resolves", flush=True)
+
+    def _route_distance_m(self) -> float | None:
+        """Remaining distance to the goal *along the road network*, or None
+        if no route is known yet -- callers fall back to the crow-flies
+        `distance_to_goal_m` in that case, same as before this existed.
+        """
+        if self._route_length_m is None:
+            return None
+        travelled = max(0.0, self.state.edge_pos - self._route_anchor_pos)
+        return max(0.0, self._route_length_m - travelled)
+
+    def _route_target(self) -> tuple[float, float]:
+        """Where to steer: a point further down the road route to the goal,
+        not the goal's raw coordinates. See the routing comment in `sense`.
+
+        Aims at the far end of the next edge on the route rather than
+        anywhere on the current one, so the target is always a real point
+        further along the path and not the spot the fly is already standing
+        on (which would give a near-zero, noisy bearing). `lane.getShape`
+        returns that edge's own polyline in SUMO's x/y frame -- a per-lane
+        runtime query, not network topology this module would otherwise have
+        to parse -- and its last point is the edge's far end.
+        """
+        if not self._route_edges:
+            return self.goal
+        try:
+            point = self._route_point_ahead(self.v.route_lookahead_m)
+        except Exception:
+            point = None
+        if point is None:
+            return self.goal
+        try:
+            lon, lat = self.traci.simulation.convertGeo(*point)
+            return lat, lon
+        except Exception:
+            return self.goal
+
+    def _route_point_ahead(self, lookahead_m: float
+                           ) -> tuple[float, float] | None:
+        """The point `lookahead_m` along the route from where the fly is.
+
+        Walks the route's lane polylines, skipping what is already behind
+        the fly on its current edge, and interpolates inside whichever
+        segment the look-ahead lands in. Returns SUMO x/y, or None if the
+        route runs out first -- the caller then steers at the goal, which is
+        correct on the last stretch.
+
+        The earlier version aimed at the far end of the next edge instead,
+        which is fine on long arterials and bad everywhere else: on a
+        49-edge route through a one-way grid the target jumped to a new edge
+        every few seconds and the bearing jumped with it, so the steering
+        spent its time chasing the discontinuities. A fixed distance ahead
+        moves smoothly and continuously, which is the whole idea behind
+        pure pursuit.
+        """
+        remaining = max(1.0, lookahead_m)
+        for index, edge in enumerate(self._route_edges):
+            shape = self._lane_shape(edge)
+            if shape is None or len(shape) < 2:
+                continue
+            # Only the current edge has anything behind the fly to skip.
+            skip = (self.state.edge_pos
+                    if index == 0 and edge == self.state.edge else 0.0)
+            for (x0, y0), (x1, y1) in zip(shape, shape[1:]):
+                seg = math.hypot(x1 - x0, y1 - y0)
+                if seg <= 0.0:
+                    continue
+                if skip >= seg:
+                    skip -= seg
+                    continue
+                usable = seg - skip
+                if remaining <= usable:
+                    frac = (skip + remaining) / seg
+                    return x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac
+                remaining -= usable
+                skip = 0.0
+        return None
+
+    def _lane_shape(self, edge: str):
+        """Lane polyline for an edge, cached for the life of the run.
+
+        Route geometry does not change, and `_route_target` now walks
+        several edges per frame rather than reading one -- without the cache
+        that is a fresh traci round trip per edge per frame.
+        """
+        if edge not in self._lane_shapes:
+            try:
+                self._lane_shapes[edge] = self.traci.lane.getShape(
+                    f"{edge}_0")
+            except Exception:
+                self._lane_shapes[edge] = None
+        return self._lane_shapes[edge]
+
     def _perceive(self, dt: float) -> tuple[list, float, float]:
         """Nearby agents, peak looming rate, horn pressure.
 
@@ -454,8 +891,9 @@ class World:
 
         # The HUD draws neighbours on a map, so telemetry still needs lon/lat.
         # Derived locally from the ego's own fix plus the metre offset rather
-        # than asked of SUMO per vehicle: over a 60 m context radius the
-        # flat-earth error is millimetres, and it costs no round trip.
+        # than asked of SUMO per vehicle: over a VISUAL_RADIUS_M context
+        # radius the flat-earth error is still under a metre, and it costs no
+        # round trip.
         lat_per_m = 1.0 / 111_320.0
         lon_per_m = lat_per_m / max(0.2, math.cos(math.radians(s.lat)))
 
@@ -477,11 +915,21 @@ class World:
             # atan2(east, north) -- the arguments are the other way round
             # from the usual atan2(y, x).
             relative = wrap180(math.degrees(math.atan2(dx, dy)) - s.heading)
-            if abs(relative) <= LOOM_FIELD_DEG:
+            # Gated on LOOM_RADIUS_M explicitly now that the subscription
+            # itself reaches out to VISUAL_RADIUS_M for the HUD's sake --
+            # this keeps the SNN seeing exactly the same 60 m/forward-cone
+            # window bug #3's panic-reflex fix was tuned against, unaffected
+            # by how far the map now draws dots.
+            if dist <= LOOM_RADIUS_M and abs(relative) <= LOOM_FIELD_DEG:
                 loom = max(loom, looming_rate(self._prev_dist.get(vid, dist),
                                               dist, dt))
             nearby.append({
                 "id": vid,
+                # Cosmetic vehicle class for the HUD's colour coding -- see
+                # BG_VEHICLE_TYPES. Defaults to "car_blue" for anything not
+                # in the map (there shouldn't be any; background vehicles are
+                # all categorised at spawn).
+                "type": self._bg_category.get(vid, "car_blue"),
                 "lat": round(s.lat + dy * lat_per_m, 6),
                 "lon": round(s.lon + dx * lon_per_m, 6),
                 "speed": round(float(data.get(traci.constants.VAR_SPEED, 0.0)), 2),
@@ -500,19 +948,108 @@ class World:
         traci = self.traci
         s = self.state
 
-        steer = max(-1.0, min(1.0, motor.steer * self.v.steer_scale))
+        if self._calibrating > 0:
+            # Calibration blink: a couple of seconds, parked, both PFL3
+            # lobes balanced (see `sense`), averaging what the readout says
+            # when no turn is being asked for. That average *is* the resting
+            # offset, and it has to be measured in the live loop rather than
+            # read from config, because `snn.steer_bias` is calibrated with
+            # only the navigation channels driven while the loop also
+            # injects odour, optic flow, looming, horn and PPL1.
+            #
+            # Without it the run orbits: measured on the attempt before this
+            # one, the command came out positive on 98.4% of frames and the
+            # fly turned circles, 81 m of path in 150 s.
+            #
+            # Runs before the filters below so neither the command average
+            # nor the offset estimate is seeded with balanced-drive frames.
+            self._calibrate_sum += motor.steer
+            self._calibrate_n += 1
+            self._calibrating -= 1
+            if self._calibrating == 0 and self._calibrate_n:
+                self._steer_rest = self._calibrate_sum / self._calibrate_n
+                print(f"[steer] resting offset {self._steer_rest:+.4f} "
+                      f"measured over {self._calibrate_n} frames", flush=True)
+            s.steer_filtered = 0.0
+            s.throttle_cmd = 0.0
+            return
+
+        # The steering readout is filtered over time before it is used, and
+        # that is not a smoothing nicety -- it is the difference between the
+        # fly homing and the fly wandering.
+        #
+        # DNa02 is one neuron per side. `scripts/probe_diagnostics.py` Test G
+        # shows the decode is cleanly directional (-15 deg/s at a 45-degree
+        # error to the left, +21 to the right), but it measures that over 200
+        # ticks. The live loop averages 5 ticks per frame, and five ticks of
+        # a sparsely firing single cell is mostly noise: measured over a real
+        # run, the sign of `steer` matched the sign of the heading error on
+        # 48.5% of 7,886 frames -- a coin flip -- and correlation stayed at
+        # 0.05 across every lag. Averaging across frames instead of within
+        # one recovers the same resolution the probe gets from tick count,
+        # at the cost of `steer_smoothing_s` of lag.
+        tau = self.v.steer_smoothing_s
+        if tau > 0.0:
+            self._steer_filtered += ((motor.steer - self._steer_filtered)
+                                     * min(1.0, dt / tau))
+            raw_steer = self._steer_filtered
+        else:
+            raw_steer = motor.steer
+
+        # Then the standing offset comes off. `snn.steer_bias` is measured
+        # by probe_diagnostics under navigation sensory alone; the live loop
+        # also injects odour, optic flow, looming, horn and -- now loudly --
+        # PPL1, and those shift DNa02's resting asymmetry away from the
+        # value that was calibrated. Measured on the run before this
+        # existed: the route target sat to the left on 95% of frames while
+        # the filtered steer was positive on 57% of them, correlation with
+        # the error a healthy 0.57 riding on an offset that outvoted it.
+        #
+        # A much slower average of the same readout *is* that offset, so
+        # subtracting it leaves the modulation and drops the bias --
+        # recalibration in the loop rather than a number in a file that was
+        # right under different conditions. The time constant has to sit far
+        # above `steer_smoothing_s` so a real sustained turn survives it.
+        # Estimated only while the route target is dead ahead, which is the
+        # one condition where the right answer is known: pointing the way
+        # the road goes, the correct command is zero, so whatever the
+        # readout says is offset by definition.
+        #
+        # Updating it on every frame instead -- the first version of this --
+        # cancels real steering along with the bias. Measured: a window
+        # where the road went left on 100% of frames, and a plain slow
+        # average quietly subtracted the sustained left the fly needed,
+        # leaving a zero-mean command against a one-sided road.
+        bias_tau = self.v.steer_bias_tau_s
+        if bias_tau > 0.0:
+            if abs(s.heading_error_deg) <= self.v.steer_bias_window_deg:
+                self._steer_rest += ((motor.steer - self._steer_rest)
+                                     * min(1.0, dt / bias_tau))
+            raw_steer -= self._steer_rest
+        s.steer_filtered = raw_steer
+        steer = max(-1.0, min(1.0, raw_steer * self.v.steer_scale))
         throttle = max(0.0, min(1.0, motor.throttle * self.v.throttle_scale))
 
         s.throttle_cmd = throttle
         s.heading = (s.heading + steer * self.v.max_turn_deg_s * dt) % 360.0
 
         if motor.panic > 0.0:
-            # Giant fiber: full braking plus an uncontrolled swerve, which is
-            # what DNp01 actually produces -- an escape, not a safe stop.
-            s.speed = max(0.0, s.speed - self.v.brake_ms2 * dt)
-            s.heading = (s.heading + math.copysign(25.0, steer or 1.0)) % 360.0
+            # Giant fiber: a startle burst -- hard acceleration plus a wide
+            # swerve. This used to brake toward 0 m/s in the same frame it
+            # swerved, which meant it rotated in place without covering any
+            # ground: _pull_to_road just eased it straight back onto the same
+            # hazard edge every time, an endless panic loop with zero net
+            # progress. A real escape needs to *displace*, not just turn.
+            #
+            # Deliberately the vehicle's absolute envelope, not the traffic
+            # cap the cruise branch uses: an escape from something looming
+            # is exactly the moment to break the speed of surrounding
+            # traffic, the same way a startled two-wheeler does.
+            s.speed = min(self.v.max_speed_ms,
+                         s.speed + self.v.max_accel_ms2 * 3.0 * dt)
+            s.heading = (s.heading + math.copysign(45.0, steer or 1.0)) % 360.0
         else:
-            target = throttle * self.v.max_speed_ms
+            target = throttle * self._speed_cap()
             delta = target - s.speed
             rate = self.v.max_accel_ms2 if delta > 0 else self.v.brake_ms2
             s.speed = max(0.0, s.speed + math.copysign(
@@ -541,6 +1078,44 @@ class World:
         except Exception:
             pass
 
+    def _speed_cap(self) -> float:
+        """Top speed on this stretch of road, this frame.
+
+        The neighbour speeds come from `state.nearby`, which `_perceive`
+        filled from the context subscription earlier in the same frame -- so
+        reading the traffic costs no extra traci call, and it measures the
+        jam the fly is actually sitting in rather than an edge-wide average
+        that would include vehicles it has already passed.
+        """
+        v = self.v
+        peers = [n["speed"] for n in self.state.nearby
+                 if n["dist"] <= v.traffic_sample_m]
+        # Kept on the instance as well as returned: the HUD shows it, and a
+        # cap the fly is pinned against looks identical to a fly that simply
+        # isn't accelerating unless you can see the number.
+        self.speed_cap_ms = traffic_speed_cap(
+            self._lane_limit(), peers, v.traffic_min_vehicles,
+            v.traffic_speed_margin, v.min_speed_cap_ms, v.max_speed_ms)
+        return self.speed_cap_ms
+
+    def _lane_limit(self) -> float:
+        """The current edge's own SUMO speed limit, cached per edge.
+
+        Falls back to the vehicle's envelope if the lane can't be read, in
+        which case the traffic term in `_speed_cap` is doing all the work --
+        the same graceful-degradation rule every other traci call here
+        follows.
+        """
+        edge = self.state.edge
+        if edge and not edge.startswith(":") and edge != self._lane_limit_edge:
+            self._lane_limit_edge = edge
+            try:
+                self._lane_limit_ms = float(
+                    self.traci.lane.getMaxSpeed(f"{edge}_0"))
+            except Exception:
+                self._lane_limit_ms = self.v.max_speed_ms
+        return self._lane_limit_ms
+
     def _pull_to_road(self, lat: float, lon: float,
                       dt: float) -> tuple[float, float]:
         """Close part of the gap back to the nearest road, and record it."""
@@ -551,6 +1126,7 @@ class World:
             return lat, lon
 
         self.state.edge = edge
+        self.state.edge_pos = pos
         try:
             x, y = traci.simulation.convert2D(edge, pos, lane)
             road_lon, road_lat = traci.simulation.convertGeo(x, y)
@@ -572,6 +1148,22 @@ class World:
         changes is how much a unit of progress is worth: the closer the goal,
         the larger the dopamine, `proximity_scale` above.
 
+        The gate reads `route_distance_to_goal_m`, not the crow-flies
+        `distance_to_goal_m`, as of this session. That distinction is the
+        other half of the road-following fix in `sense()`: if progress were
+        still measured as a straight line to the goal, then any detour the
+        road network actually requires -- going around a block to get past a
+        building sitting on the direct line -- would read as moving *away*
+        from the goal and earn nothing, punishing the fly for the only path
+        that was ever available. Gating on distance-along-the-route instead
+        means a legal detour that shortens the real remaining drive is
+        rewarded exactly like any other progress, which is what lets the
+        existing trial-and-error learning here actually discover working
+        routes instead of being pushed to keep failing the same straight
+        line. `route_distance_to_goal_m` itself falls back to the crow-flies
+        distance whenever no route is known, so this degrades to the old
+        behaviour rather than breaking when routing can't resolve.
+
         The progress threshold moved from 100 m to `snn.progress_threshold_m`
         (12 m). At 100 m the channel fired at most twice in a 25,727-frame run
         -- `closed_m` for that entire run was 103.6 m -- so `_reinforce` ran
@@ -584,9 +1176,10 @@ class World:
         """
         s = self.state
         r = self.cfg.snn
+        goal_m = s.route_distance_to_goal_m
         pam = 0.0
-        if s.distance_to_goal_m < self.best_distance_m - r.progress_threshold_m:
-            self.best_distance_m = s.distance_to_goal_m
+        if goal_m < self.best_distance_m - r.progress_threshold_m:
+            self.best_distance_m = goal_m
             pam = 1.0
         elif s.speed > 8.33:                       # sustained clean cruising
             pam = 0.3
@@ -605,11 +1198,21 @@ class World:
             # was asked for. `pam_current_min` is read off that curve as the
             # current that actually produces `reward_far_scale` of the
             # dopamine `pam_current_max` produces.
-            scale = proximity_scale(s.distance_to_goal_m, r.reward_near_m,
+            scale = proximity_scale(goal_m, r.reward_near_m,
                                     r.reward_far_m, r.reward_far_scale)
             span = (scale - r.reward_far_scale) / (1.0 - r.reward_far_scale)
             pam *= r.pam_current_min + span * (r.pam_current_max
                                                - r.pam_current_min)
+
+        # Going the wrong way, measured along the route rather than as a
+        # bearing: a legal detour still shortens the drive, so only distance
+        # growing counts as wrong. Smoothed, because a single frame's
+        # difference is mostly the edge-snapping jitter of `edge_pos`, and
+        # punishing that would punish nothing the fly did.
+        away_ms = (goal_m - self._prev_route_m) / max(self.step_length, 1e-3)
+        self._prev_route_m = goal_m
+        self._away_ema += (away_ms - self._away_ema) * r.wrong_way_smoothing
+        s.wrong_way_ms = self._away_ema
 
         ppl1 = 0.0
         if s.stalled_s > 45.0:
@@ -618,6 +1221,46 @@ class World:
             ppl1 = 0.7
         elif math.isinf(s.off_road_m):
             ppl1 = 0.5
+        # Phasic, not tonic, and that distinction is load-bearing.
+        # `_reinforce`'s own docstring says it: a sustained punishment
+        # depresses the motor pathway the fly needs in order to escape. Held
+        # continuously high, this channel did exactly that -- mean pain 0.43
+        # across a run, and the steering signal that had just been recovered
+        # went back to zero-mean while the road asked for a turn on 99% of
+        # frames. So the punishment fires as a pulse when the fly starts
+        # getting it wrong, decays, and can only re-fire after a refractory
+        # gap, which is also how PPL1 behaves in the animal.
+        self._wrong_way_pulse *= math.exp(
+            -self.step_length / max(r.wrong_way_pulse_s, 1e-3))
+        self._wrong_way_cooldown = max(
+            0.0, self._wrong_way_cooldown - self.step_length)
+        if self._away_ema > r.wrong_way_threshold_ms:
+            # Joel, watching a run: "PPL1 needs to be pretty high when going
+            # the wrong way, especially when it's far away from the goal."
+            # Before this the only punishments were a 45-second stall, a
+            # pothole and leaving the network entirely -- driving away from
+            # the goal at speed, the one thing a navigating fly most needs
+            # to stop doing, cost it nothing at all.
+            #
+            # Distance scales it because a wrong turn 50 m out is a wrong
+            # turn; the same heading 5 km out is the whole trip going wrong.
+            # The ceiling is deliberate: enough to trigger the escape
+            # response, not so much that the fly thrashes.
+            # Graded on two axes, not one. Distance alone made the channel
+            # effectively binary on a short route -- anything past
+            # `wrong_way_full_m` pinned it at the ceiling, so Joel watched
+            # the pain rise once and then sit there. How *fast* the fly is
+            # getting it wrong is the half that keeps moving: drifting away
+            # at 1 m/s and barrelling away at 5 are not the same mistake.
+            far = min(1.0, goal_m / max(r.wrong_way_full_m, 1.0))
+            hard = min(1.0, self._away_ema / max(r.wrong_way_full_ms, 1e-3))
+            severity = 0.5 * far + 0.5 * hard
+            target = (r.wrong_way_min
+                      + (r.wrong_way_max - r.wrong_way_min) * severity)
+            if self._wrong_way_cooldown <= 0.0:
+                self._wrong_way_pulse = max(self._wrong_way_pulse, target)
+                self._wrong_way_cooldown = r.wrong_way_refractory_s
+        ppl1 = max(ppl1, self._wrong_way_pulse)
         return pam, ppl1
 
     def step_sumo(self) -> None:
@@ -650,11 +1293,15 @@ class World:
         s.off_road_m = 0.0
         s.nearby = []
         s.distance_to_goal_m = haversine_m(*self.origin, *self.goal)
-        # Reset the ratchet too: `best_distance_m` is monotonic within an
-        # episode, so carrying it across would mean the next run starts
-        # already "past" its own progress and can never earn reward again.
-        self.best_distance_m = s.distance_to_goal_m
+        s.route_distance_to_goal_m = s.distance_to_goal_m
         self._prev_dist = {}
+
+        # The route resets too: whatever path the fly had worked out from
+        # wherever it ended the last episode does not start anywhere near the
+        # origin. Cleared here and recomputed below, once `s.edge` is current.
+        self._route_edge = None
+        self._route_edges = []
+        self._route_length_m = None
 
         try:
             x, y = self.traci.simulation.convertGeo(s.lon, s.lat, fromGeo=True)
@@ -665,8 +1312,35 @@ class World:
         except Exception:
             pass
 
-        edge, _pos, _lane = self._edge_at(s.lat, s.lon)
+        edge, pos, _lane = self._edge_at(s.lat, s.lon)
         s.edge = edge
+        s.edge_pos = pos
+
+        self._update_route()
+        route_m = self._route_distance_m()
+        if route_m is not None:
+            s.route_distance_to_goal_m = route_m
+        # Reset the ratchet too: `best_distance_m` is monotonic within an
+        # episode, so carrying it across would mean the next run starts
+        # already "past" its own progress and can never earn reward again.
+        # Matches whichever distance `rewards()` now gates on.
+        self.best_distance_m = s.route_distance_to_goal_m
+        # Same reasoning for the wrong-way detector: a fresh episode has not
+        # moved anywhere yet, and the jump from wherever the last one ended
+        # back to the origin is a teleport, not a wrong turn.
+        self._prev_route_m = s.route_distance_to_goal_m
+        self._away_ema = 0.0
+        self._wrong_way_pulse = 0.0
+        self._wrong_way_cooldown = 0.0
+        s.wrong_way_ms = 0.0
+        # Re-measure the steering offset for the new episode: the resting
+        # asymmetry moves with the channel mix, and a fresh episode has a
+        # fresh one.
+        self._calibrating = int(self.v.steer_calibration_s
+                                / max(self.step_length, 1e-3))
+        self._calibrate_sum = 0.0
+        self._calibrate_n = 0
+        self._steer_filtered = 0.0
 
         if navigator is not None:
             navigator.reset()

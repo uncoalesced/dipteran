@@ -22,6 +22,7 @@ import datetime as dt
 import json
 import re
 import shutil
+import subprocess
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -322,11 +323,7 @@ def _download(source: Source, target: Path) -> Path:
               flush=True)
         try:
             started = time.monotonic()
-            request = urllib.request.Request(
-                url, headers={"User-Agent": "dipteran/0.1"})
-            with urllib.request.urlopen(request, timeout=120) as response, \
-                    open(tmp, "wb") as fh:
-                shutil.copyfileobj(response, fh, length=1 << 22)
+            _fetch(url, tmp)
             size = tmp.stat().st_size
             if source.size_bytes is not None and size != source.size_bytes:
                 raise RuntimeError(
@@ -339,13 +336,56 @@ def _download(source: Source, target: Path) -> Path:
             return target
         except Exception as exc:
             last_error = exc
-            tmp.unlink(missing_ok=True)
             print(f"[flywire] {url} failed: {exc}", flush=True)
+            # tmp is deliberately kept, not deleted -- on a resumable
+            # download it holds real progress. It's only ever removed once
+            # every URL has been exhausted (below).
+    tmp.unlink(missing_ok=True)
     raise RuntimeError(
         f"could not fetch {target.name}: {last_error}\n"
         f"Source: {source.description}\n"
         f"Download it manually to {target} if the network is blocked."
     )
+
+
+def _fetch(url: str, tmp: Path) -> None:
+    """Resumable, retrying download via curl, falling back to a single
+    urllib request if curl isn't on PATH.
+
+    A large (multi-hundred-MB) file over a connection that stalls partway
+    through is exactly what this needs to survive: curl -C - resumes from
+    tmp's existing size instead of restarting from byte 0 on every retry,
+    and --speed-limit/--speed-time aborts a transfer that's crawled to a
+    near-stop so --retry can reconnect, rather than sitting on one dead
+    connection until a long fixed timeout expires. A naive
+    urlopen-then-copy loses all progress on every failure, which is why an
+    earlier version of this function needed three from-scratch attempts
+    (up to a 600s timeout each) to fail the exact same way each time.
+    """
+    cmd = [
+        "curl", "-fSL",
+        "-C", "-",                                       # resume tmp
+        "--retry", "20", "--retry-delay", "3", "--retry-all-errors",
+        "--speed-limit", "2000", "--speed-time", "30",    # reconnect if the
+                                                            # transfer drops
+                                                            # under ~2KB/s
+                                                            # for 30s
+        "-A", "dipteran/0.1",
+        "-o", str(tmp),
+        url,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return
+    except FileNotFoundError:
+        pass   # no curl on PATH -- fall through to urllib below
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"curl failed: {exc.stderr.strip() or exc}") from exc
+
+    request = urllib.request.Request(url, headers={"User-Agent": "dipteran/0.1"})
+    with urllib.request.urlopen(request, timeout=120) as response, \
+            open(tmp, "wb") as fh:
+        shutil.copyfileobj(response, fh, length=1 << 22)
 
 
 # --------------------------------------------------------------------------

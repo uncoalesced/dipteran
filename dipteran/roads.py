@@ -276,6 +276,12 @@ def build_sumo_net(cfg: Config, force: bool = False) -> Path:
         "--tls.discard-simple", "true",
         "--tls.join", "true",
         "--no-turnarounds", "true",
+        # India drives on the left. Without this netconvert builds a
+        # right-hand network wherever the OSM extract is from, and every
+        # vehicle in the simulation -- the fly included -- runs on the wrong
+        # side of every road, which is the first thing anyone who has driven
+        # in Bangalore notices about the map.
+        *(["--lefthand", "true"] if cfg.sumo.left_hand else []),
     ]
     print(f"[sumo] {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
