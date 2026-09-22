@@ -650,7 +650,26 @@
     collapsible('hud-header', 'hud-body', 'hud-arrow', true, 'block',
                 () => brain.resize && brain.resize());
 
+    // Consecutive identical lines collapse into one with a counter, because
+    // the backend's `event` is a per-frame description of the current state,
+    // not an edge-triggered notification. A pothole that takes 19 seconds to
+    // drive over is 191 frames of "POTHOLE IMPACT" -- measured, that is the
+    // exact count from the 2026-09-22 twisty run -- and ARRIVED is worse:
+    // the sim thread breaks on arrival but the socket keeps resending the
+    // frozen payload at 10 Hz, so it logged ten identical lines a second
+    // indefinitely. Measured at 250 lines in the 25 s after one arrival.
+    // Either way the interesting history scrolls out of the 80-line buffer.
+    let lastLogged = null;
+    let lastCount = 0;
+
     function log(text, tone) {
+      if (text === lastLogged && term.firstElementChild) {
+        lastCount += 1;
+        term.firstElementChild.textContent = `> ${text} (x${lastCount})`;
+        return;
+      }
+      lastLogged = text;
+      lastCount = 1;
       const item = document.createElement('div');
       item.className = tone || 'text-amber-400/90';
       item.textContent = `> ${text}`;
