@@ -741,12 +741,18 @@ class World:
         self._warn_no_route(edge, why)
 
     def _warn_no_route(self, edge: str, why: str) -> None:
-        """Print the first fallback-to-bee-line per run, then stay quiet.
+        """Print the first frame of each routing outage, then stay quiet.
 
         Falling back is by design and can happen on a lot of consecutive
-        frames; a print per frame at 10 Hz would bury the log. One line is
-        enough to answer the only question worth asking -- did the road
-        route ever fail -- so the counter is reported at the end instead.
+        frames; a print per frame at 10 Hz would bury the log. One line per
+        outage answers the question worth asking -- did the road route fail,
+        and where.
+
+        One line *per outage*, not per run: `_update_route` zeroes the
+        counter on a successful route, so this re-arms and the next failure
+        prints again. Reading these as "one line means one failure for the
+        whole run" undercounts badly -- the 2026-09-22 twisty run printed
+        six before its first episode ended, from two different edges.
         """
         self._no_route_frames = getattr(self, "_no_route_frames", 0) + 1
         if self._no_route_frames == 1:
