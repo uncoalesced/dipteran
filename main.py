@@ -324,7 +324,6 @@ class Simulation:
                     fov_deg=LOOM_FIELD_DEG * 2.0, fov_radius_m=LOOM_RADIUS_M,
                     heading_error_deg=s.heading_error_deg,
                     wrong_way_ms=s.wrong_way_ms,
-                    speed_cap_ms=world.speed_cap_ms,
                     steer_filtered=s.steer_filtered,
                 )
 

@@ -91,7 +91,8 @@ def balanced_pfl3(half_angle_deg: float) -> float:
     calibration blink in `World.apply` injects it on both lobes, and
     `scripts/probe_diagnostics.py` measures `snn.steer_bias` at the same
     point. It moves with the lobe width, which is why it is computed rather
-    than written down -- at the 90-degree default it is zero.
+    than written down -- at the configured 70 degrees it is 0.342, and at a
+    90-degree width it would be zero, which is what makes 90 unusable.
     """
     return math.cos(math.radians(half_angle_deg))
 
@@ -160,34 +161,6 @@ def looming_rate(prev_dist: float, dist: float, dt: float,
     return max(0.0, (theta_now - theta_prev) / dt)
 
 
-def traffic_speed_cap(lane_limit_ms: float, peer_speeds: list[float],
-                      min_vehicles: int, margin: float,
-                      floor_ms: float, ceiling_ms: float) -> float:
-    """How fast the fly may go *here*, from the lane and its traffic.
-
-    One global top speed is wrong in both directions on this map: 57.6 km/h
-    through the Silk Board jam is physically impossible, and the same number
-    on an empty inner road is a ceiling nothing ever approaches. The lane's
-    own SUMO speed limit covers the second case; the mean speed of the
-    vehicles around the fly covers the first, because a jam *is* its
-    neighbours moving slowly.
-
-    `margin` is above 1.0 deliberately -- a fly-sized vehicle filters
-    through stopped traffic the way a two-wheeler does rather than queueing
-    in lane -- and `floor_ms` stops a full standstill pinning it at zero,
-    which would make a jam an inescapable trap instead of slow going.
-
-    Pure: no traci, no state. `World._speed_cap` supplies the arguments.
-    """
-    ceiling = max(0.0, ceiling_ms)
-    cap = min(lane_limit_ms, ceiling)
-    if len(peer_speeds) >= min_vehicles:
-        cap = min(cap, (sum(peer_speeds) / len(peer_speeds)) * margin)
-    # The floor is held under the ceiling too, so a mis-set floor can never
-    # hand out more speed than the vehicle's envelope allows.
-    return max(min(floor_ms, ceiling), min(cap, ceiling))
-
-
 def steering_drive(error_deg: float, half_angle_deg: float = 70.0
                    ) -> tuple[float, float]:
     """Signed heading error -> (PFL3-left drive, PFL3-right drive).
@@ -213,8 +186,10 @@ def steering_drive(error_deg: float, half_angle_deg: float = 70.0
     an earlier draft of this formula shipped with its worked example
     contradicting its own arithmetic, twice.
 
-        error = +45 (goal to the right) -> left lobe 1.0, right lobe 0.0
-        error =   0 (dead ahead)        -> both 0.707, no net turn
+    At the configured 70-degree width:
+
+        error = +70 (goal to the right) -> left lobe 1.0, right lobe 0.0
+        error =   0 (dead ahead)        -> both 0.342, no net turn
         error = 180 (behind)            -> both 0.0, the dead zone
 
     That dead zone is why `half_angle_deg` is configurable and why
@@ -289,11 +264,13 @@ class VehicleState:
     # estimate doesn't jump by a whole edge length the instant it enters one.
     edge_pos: float = 0.0
     # Remaining distance to the goal *along the road network* SUMO knows
-    # about, not the crow-flies line `distance_to_goal_m` is. Falls back to
-    # `distance_to_goal_m` whenever no route can be found (see
-    # `_route_distance_m`). This is what `rewards()` now gates progress on --
-    # see the comment there for why the crow-flies distance could not do that
-    # job on its own.
+    # about, not the crow-flies line `distance_to_goal_m` is. Always in route
+    # metres once a route has resolved: while routing is failing it holds the
+    # last known route distance rather than switching to crow-flies, which is
+    # what it used to do and which produced a 4.8x unit jump mid-episode (see
+    # `_route_distance_now`). `World.route_valid` says which you are reading.
+    # This is what `rewards()` now gates progress on -- see the comment there
+    # for why the crow-flies distance could not do that job on its own.
     route_distance_to_goal_m: float = 0.0
     travelled_m: float = 0.0
     stalled_s: float = 0.0
@@ -376,6 +353,10 @@ class World:
         self._route_anchor_pos: float = 0.0
         self._route_retry: int = 0
         self._lane_shapes: dict[str, list | None] = {}
+        # Last live route distance, held across routing failures so the
+        # published value never silently changes units -- see
+        # `_route_distance_now` for the measurement that made this necessary.
+        self._last_route_m: float | None = None
         # Wrong-way detection state -- see the punishment branch in
         # `rewards()`. Seeded from the starting route distance so the first
         # frame reads zero movement rather than the whole route's length.
@@ -384,12 +365,6 @@ class World:
         self._wrong_way_pulse: float = 0.0
         self._wrong_way_cooldown: float = 0.0
 
-        # Lane speed limit of the edge the fly is on, cached because it only
-        # changes when the edge does -- see `_speed_cap`.
-        self._lane_limit_edge: str | None = None
-        self._lane_limit_ms: float = self.v.max_speed_ms
-        # Last value `_speed_cap` produced, for telemetry.
-        self.speed_cap_ms: float = self.v.max_speed_ms
         # Fast and slow running averages of the steering readout -- see
         # `apply`. The fast one is the command; the slow one is the standing
         # offset subtracted from it.
@@ -416,6 +391,7 @@ class World:
         if route_m is not None:
             self.state.route_distance_to_goal_m = route_m
             self.best_distance_m = route_m
+            self._last_route_m = route_m
         # Seeded here rather than above, because the route distance found
         # above is usually much larger than the crow-flies distance the
         # state carried before it: reading the difference as a frame's worth
@@ -620,9 +596,7 @@ class World:
         # same reward-driven trial and error as everything else here -- this
         # only fixes what the compass is allowed to say, not who acts on it.
         self._update_route()
-        route_m = self._route_distance_m()
-        s.route_distance_to_goal_m = (route_m if route_m is not None
-                                      else s.distance_to_goal_m)
+        s.route_distance_to_goal_m = self._route_distance_now()
         target_lat, target_lon = self._route_target()
 
         # Odour beacon: PLAN.md's inverse gradient, normalised so it saturates
@@ -678,12 +652,16 @@ class World:
             # cannot be injected as-is.
             #
             # Scaled, not clipped, and the difference is the whole signal.
-            # `min(0.4, lobe)` looks equivalent and destroys the channel: dead
-            # ahead the lobes are 0.707/0.707 and both clip to 0.4/0.4, while
-            # a goal hard right gives 1.0/0.0 which clips to 0.4/0.0 -- the
-            # left lobe reads 0.4 in both cases, so half the steering range
-            # collapses to a constant. Multiplying keeps the ratio intact:
-            # 0.283/0.283 dead ahead, 0.4/0.0 hard right.
+            # `min(0.4, lobe)` looks equivalent and destroys the channel --
+            # shown at a 45-degree lobe width, the geometry where it bites:
+            # dead ahead the lobes are 0.707/0.707 and both clip to 0.4/0.4,
+            # while a goal hard right gives 1.0/0.0 which clips to 0.4/0.0 --
+            # the left lobe reads 0.4 in both cases, so half the steering
+            # range collapses to a constant. Multiplying keeps the ratio
+            # intact: 0.283/0.283 dead ahead, 0.4/0.0 hard right. At the
+            # configured 70 degrees the dead-ahead lobes are 0.342, scaling
+            # to 0.137/0.137. `test_steering_scaling_preserves_contrast`
+            # asserts this at the 45-degree width for the same reason.
             "steer_drive_pfl3_l": pfl3_left * SENSORY_CEILING,
             "steer_drive_pfl3_r": pfl3_right * SENSORY_CEILING,
             "optic_flow_t4": flow,
@@ -777,14 +755,68 @@ class World:
                   f"resolves", flush=True)
 
     def _route_distance_m(self) -> float | None:
-        """Remaining distance to the goal *along the road network*, or None
-        if no route is known yet -- callers fall back to the crow-flies
-        `distance_to_goal_m` in that case, same as before this existed.
+        """Remaining distance to the goal *along the road network*.
+
+        None means "no live route right now". It does NOT mean "use the
+        crow-flies distance instead" -- see `_route_distance_now`, which is
+        what callers should read. Substituting one for the other is what
+        produced this project's most misleading number to date.
         """
         if self._route_length_m is None:
             return None
         travelled = max(0.0, self.state.edge_pos - self._route_anchor_pos)
         return max(0.0, self._route_length_m - travelled)
+
+    def _route_distance_now(self) -> float:
+        """The route distance to publish this frame, in route metres.
+
+        On a routing failure this holds the last known *route* distance
+        rather than swapping in the crow-flies one, and that distinction is
+        the whole point of this method existing.
+
+        What it fixes, measured: on the 2026-09-19 twisty run the route was
+        2,398 m along roads to cover 502 m direct -- a 4.8x ratio, because
+        the route is a one-way loop system. Mid-episode `findRoute` failed
+        once, `_route_length_m` went None, and this value silently became
+        the crow-flies 536 m. Everything downstream read that as 1,862 m of
+        progress in a single frame:
+
+          - `run_route.py` reported "episode 1 ... closed 1862 m of route"
+            for an episode that travelled 790 m in total. Closing more route
+            than you drove is not possible, and that impossibility is what
+            exposed this.
+          - `rewards()` gates progress dopamine on this number, so the drop
+            fired a full-strength reward and ratcheted `best_distance_m`
+            down to 536, where nothing could earn reward again for the rest
+            of the episode.
+          - The wrong-way detector saw the reverse jump on recovery as
+            driving away from the goal at enormous speed.
+
+        Going stale is the correct failure mode: a frozen route distance
+        makes `rewards()` decline to fire rather than fire wrongly, and the
+        crow-flies distance is still published separately as
+        `distance_to_goal_m` for anything that genuinely wants it.
+
+        Before any route has ever resolved there is nothing to hold, so the
+        crow-flies distance seeds it -- that is a starting value, not a
+        substitution, and `route_valid` reports which of the two you got.
+        """
+        route_m = self._route_distance_m()
+        if route_m is not None:
+            self._last_route_m = route_m
+        return (self._last_route_m if self._last_route_m is not None
+                else self.state.distance_to_goal_m)
+
+    @property
+    def route_valid(self) -> bool:
+        """Whether `route_distance_to_goal_m` is a live route measurement.
+
+        False while routing is failing (the value is the last known one,
+        held) or before the first route ever resolved (it is crow-flies).
+        Recorded per episode so a run whose numbers were taken during an
+        outage is identifiable afterwards instead of silently averaged in.
+        """
+        return self._route_length_m is not None
 
     def _route_target(self) -> tuple[float, float]:
         """Where to steer: a point further down the road route to the goal,
@@ -1041,15 +1073,15 @@ class World:
             # hazard edge every time, an endless panic loop with zero net
             # progress. A real escape needs to *displace*, not just turn.
             #
-            # Deliberately the vehicle's absolute envelope, not the traffic
-            # cap the cruise branch uses: an escape from something looming
-            # is exactly the moment to break the speed of surrounding
-            # traffic, the same way a startled two-wheeler does.
+            # Three times the normal acceleration, against the same envelope
+            # the cruise branch uses: an escape from something looming is
+            # exactly the moment to out-accelerate surrounding traffic, the
+            # way a startled two-wheeler does.
             s.speed = min(self.v.max_speed_ms,
                          s.speed + self.v.max_accel_ms2 * 3.0 * dt)
             s.heading = (s.heading + math.copysign(45.0, steer or 1.0)) % 360.0
         else:
-            target = throttle * self._speed_cap()
+            target = throttle * self.v.max_speed_ms
             delta = target - s.speed
             rate = self.v.max_accel_ms2 if delta > 0 else self.v.brake_ms2
             s.speed = max(0.0, s.speed + math.copysign(
@@ -1077,44 +1109,6 @@ class World:
             traci.vehicle.setSpeed(EGO_ID, s.speed)
         except Exception:
             pass
-
-    def _speed_cap(self) -> float:
-        """Top speed on this stretch of road, this frame.
-
-        The neighbour speeds come from `state.nearby`, which `_perceive`
-        filled from the context subscription earlier in the same frame -- so
-        reading the traffic costs no extra traci call, and it measures the
-        jam the fly is actually sitting in rather than an edge-wide average
-        that would include vehicles it has already passed.
-        """
-        v = self.v
-        peers = [n["speed"] for n in self.state.nearby
-                 if n["dist"] <= v.traffic_sample_m]
-        # Kept on the instance as well as returned: the HUD shows it, and a
-        # cap the fly is pinned against looks identical to a fly that simply
-        # isn't accelerating unless you can see the number.
-        self.speed_cap_ms = traffic_speed_cap(
-            self._lane_limit(), peers, v.traffic_min_vehicles,
-            v.traffic_speed_margin, v.min_speed_cap_ms, v.max_speed_ms)
-        return self.speed_cap_ms
-
-    def _lane_limit(self) -> float:
-        """The current edge's own SUMO speed limit, cached per edge.
-
-        Falls back to the vehicle's envelope if the lane can't be read, in
-        which case the traffic term in `_speed_cap` is doing all the work --
-        the same graceful-degradation rule every other traci call here
-        follows.
-        """
-        edge = self.state.edge
-        if edge and not edge.startswith(":") and edge != self._lane_limit_edge:
-            self._lane_limit_edge = edge
-            try:
-                self._lane_limit_ms = float(
-                    self.traci.lane.getMaxSpeed(f"{edge}_0"))
-            except Exception:
-                self._lane_limit_ms = self.v.max_speed_ms
-        return self._lane_limit_ms
 
     def _pull_to_road(self, lat: float, lon: float,
                       dt: float) -> tuple[float, float]:
@@ -1302,6 +1296,11 @@ class World:
         self._route_edge = None
         self._route_edges = []
         self._route_length_m = None
+        # The held route distance goes with it. Holding the *previous*
+        # episode's last route distance across a teleport back to the origin
+        # would be exactly the stale-value bug `_route_distance_now` exists
+        # to prevent, one level up.
+        self._last_route_m = None
 
         try:
             x, y = self.traci.simulation.convertGeo(s.lon, s.lat, fromGeo=True)
@@ -1317,13 +1316,16 @@ class World:
         s.edge_pos = pos
 
         self._update_route()
-        route_m = self._route_distance_m()
-        if route_m is not None:
-            s.route_distance_to_goal_m = route_m
+        s.route_distance_to_goal_m = self._route_distance_now()
         # Reset the ratchet too: `best_distance_m` is monotonic within an
         # episode, so carrying it across would mean the next run starts
         # already "past" its own progress and can never earn reward again.
-        # Matches whichever distance `rewards()` now gates on.
+        # Matches whichever distance `rewards()` now gates on -- and this
+        # goes through `_route_distance_now` for the same reason the
+        # constructor guards on `route_m is not None`: seeding the ratchet
+        # with crow-flies metres while `rewards()` later compares route
+        # metres sets it 4.8x too tight on the twisty route, so no progress
+        # could ever be earned. The two paths disagreed until 2026-09-22.
         self.best_distance_m = s.route_distance_to_goal_m
         # Same reasoning for the wrong-way detector: a fresh episode has not
         # moved anywhere yet, and the jump from wherever the last one ended

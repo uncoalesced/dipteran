@@ -91,6 +91,12 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
         episode_start_m = distance_start
         episode_start_route_m = s.route_distance_to_goal_m
         route_min = s.route_distance_to_goal_m
+        # Frames this episode spent with no live road route. Recorded because
+        # a closure figure measured across a routing outage used to be a
+        # different quantity from one measured without -- see
+        # `World._route_distance_now`. Non-zero here means read the episode's
+        # numbers with that in mind.
+        episode_no_route_frames = 0
         off_network = 0
         off_road: list[float] = []
         panic_frames = 0
@@ -173,6 +179,8 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
             stall_peak = max(stall_peak, s.stalled_s)
             distance_min = min(distance_min, s.distance_to_goal_m)
             route_min = min(route_min, s.route_distance_to_goal_m)
+            if not world.route_valid:
+                episode_no_route_frames += 1
 
             # -- episode boundary ------------------------------------------
             # Arriving, or running out of episode, ends an *attempt* rather
@@ -188,6 +196,19 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
             if episode_over:
                 hit = s.distance_to_goal_m <= ARRIVAL_M
                 arrived = arrived or hit
+                closed_route = episode_start_route_m - route_min
+                # You cannot close more route than you drove. This is not a
+                # style assertion: the 2026-09-19 twisty run reported closing
+                # 1,862 m of route in an episode that travelled 790 m, and
+                # that impossibility is the only reason the unit switch
+                # behind it was ever found (see `World._route_distance_now`).
+                # 1 m of slack absorbs the rounding in `travelled_m`, which
+                # accumulates per-frame haversine steps.
+                assert closed_route <= s.travelled_m + 1.0, (
+                    f"episode {len(episodes) + 1} closed {closed_route:.1f} m "
+                    f"of route on {s.travelled_m:.1f} m travelled -- route "
+                    f"distance changed units or jumped; "
+                    f"{episode_no_route_frames} frames had no live route")
                 episodes.append({
                     "episode": len(episodes) + 1,
                     "arrived": hit,
@@ -198,18 +219,23 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                     # drive, where real progress barely moves the straight
                     # line. Route distance is what the fly is actually
                     # working against, and what `rewards()` gates on.
-                    "closed_route_m": round(
-                        episode_start_route_m - route_min, 1),
+                    "closed_route_m": round(closed_route, 1),
                     "best_route_m": round(route_min, 1),
                     "best_distance_m": round(distance_min, 1),
                     "travelled_m": round(s.travelled_m, 1),
+                    # Frames with no live road route. Above zero means the
+                    # route figures were held rather than measured for part
+                    # of this episode.
+                    "no_route_frames": episode_no_route_frames,
                     "plastic_drift": round(navigator.drift(), 6),
                 })
                 print(f"[route] episode {len(episodes)}: "
                       f"{'ARRIVED' if hit else 'timed out'} after "
                       f"{episode_frames} frames, closed "
-                      f"{episode_start_route_m - route_min:.0f} m of route "
+                      f"{closed_route:.0f} m of route "
                       f"({episode_start_m - distance_min:.0f} m direct), "
+                      f"travelled {s.travelled_m:.0f} m, "
+                      f"{episode_no_route_frames} frames no route, "
                       f"drift {navigator.drift():.2e}", flush=True)
                 if len(episodes) >= max_episodes:
                     break
@@ -219,6 +245,7 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                 distance_min = s.distance_to_goal_m
                 episode_start_route_m = s.route_distance_to_goal_m
                 route_min = s.route_distance_to_goal_m
+                episode_no_route_frames = 0
                 continue
 
             now = time.monotonic()

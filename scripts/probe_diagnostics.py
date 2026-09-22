@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import math
 import json
 import shutil
 import sys
@@ -499,20 +498,20 @@ def test_f(nav, cfg, neurons, clusters, side_of) -> dict:
     }
 
 
-def calibrate_steer_bias(nav, clusters, side_of) -> dict:
+def calibrate_steer_bias(nav, clusters, side_of, cfg) -> dict:
     """Measure `snn.steer_bias`: the readout's resting value, dead ahead.
 
     `config.yaml` says this number is reproduced here, so it is produced here
     rather than transcribed. The operating point is the one the live loop
     actually sits at when the fly is pointed straight at the goal: navigation
-    sensory at DRIVE, and both PFL3 populations driven equally at
-    `world.SENSORY_CEILING` -- which is what `steering_drive(0)` yields once
-    `sense()` clamps its two 0.707 lobes.
+    sensory at DRIVE, and both PFL3 populations driven equally at the
+    balanced lobe value -- which is what `steering_drive(0)` yields once
+    `sense()` clamps its two lobes.
 
     Whatever `steer` reads under that balanced condition is, by definition,
     the offset that should decode as "no turn".
     """
-    from dipteran.world import SENSORY_CEILING
+    from dipteran.world import SENSORY_CEILING, balanced_pfl3
 
     sensory = [n for n in NAVIGATION_SENSORY if n in nav.roles]
     pfl3_l = clusters["clusters"]["steer_drive_pfl3_l"]["rows"]
@@ -520,10 +519,14 @@ def calibrate_steer_bias(nav, clusters, side_of) -> dict:
     rows_l = clusters["clusters"]["steer_left"]["rows"]
     rows_r = clusters["clusters"]["steer_right"]["rows"]
 
-    # Dead ahead, `steering_drive(0)` gives both lobes cos(45) = 0.707,
-    # which `sense()` scales by SENSORY_CEILING. That is the balanced
-    # operating point, not a flat SENSORY_CEILING on both sides.
-    balanced = math.cos(math.radians(45.0)) * SENSORY_CEILING
+    # Dead ahead, `steering_drive(0)` gives both lobes cos(half_angle), which
+    # `sense()` scales by SENSORY_CEILING. That is the balanced operating
+    # point, not a flat SENSORY_CEILING on both sides. Read from config via
+    # the same helper `World.apply`'s calibration blink uses: this was
+    # hardcoded to cos(45) = 0.707 while `snn.steer_half_angle_deg` moved to
+    # 70 on 2026-09-19, so the diagnostic was measuring an operating point
+    # the live loop no longer sits at.
+    balanced = balanced_pfl3(cfg.snn.steer_half_angle_deg) * SENSORY_CEILING
     rates, _ = probe(nav, {name: DRIVE for name in sensory},
                      row_currents=[(pfl3_l, balanced),
                                    (pfl3_r, balanced)])
@@ -684,7 +687,7 @@ def main() -> int:
     result["test_g_directional"] = test_g_directional_response(
         nav, clusters, cfg)
     result["steer_bias_calibration"] = calibrate_steer_bias(
-        nav, clusters, side_of)
+        nav, clusters, side_of, cfg)
     result["test_e_bilateral_authority"] = test_e(nav, clusters, side_of)
     result["test_f_pfl3_authority"] = test_f(nav, cfg, built["neurons"],
                                              clusters, side_of)

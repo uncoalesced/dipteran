@@ -47,7 +47,6 @@ from dipteran.world import (  # noqa: E402
     looming_rate,
     proximity_scale,
     steering_drive,
-    traffic_speed_cap,
     wrap180,
 )
 
@@ -482,38 +481,6 @@ def test_looming_accelerates_when_nearer():
 def test_looming_guards_degenerate_input():
     assert looming_rate(10.0, 5.0, dt=0.0) == 0.0
     assert looming_rate(0.0, 5.0, dt=0.1) == 0.0
-
-
-# -- traffic-aware speed cap -----------------------------------------------
-# The complaint these exist for: 57.6 km/h across the Silk Board flyover is
-# not a thing that happens, while the same number on an empty inner road is
-# a ceiling nothing ever gets near.
-
-def test_speed_cap_is_the_lane_limit_on_an_empty_road():
-    """Nothing around: the lane's own limit is the only constraint."""
-    assert traffic_speed_cap(13.9, [], 3, 1.25, 2.8, 16.0) == 13.9
-
-
-def test_speed_cap_ignores_a_couple_of_neighbours():
-    """Two vehicles is traffic, not a jam. Below the threshold, no effect."""
-    assert traffic_speed_cap(11.1, [1.0, 1.0], 3, 1.25, 2.8, 16.0) == 11.1
-
-
-def test_speed_cap_follows_a_jam_down():
-    """Six neighbours at 4 m/s cap the fly at 5 m/s, not at the lane's 16."""
-    assert traffic_speed_cap(16.0, [4.0] * 6, 3, 1.25, 2.8, 16.0) == 5.0
-
-
-def test_speed_cap_floors_a_standstill():
-    """Gridlock slows the fly; it must not freeze it in place."""
-    assert traffic_speed_cap(16.0, [0.0] * 8, 3, 1.25, 2.8, 16.0) == 2.8
-
-
-def test_speed_cap_never_exceeds_the_vehicle_envelope():
-    """A motorway lane limit does not make the fly a motorway vehicle."""
-    assert traffic_speed_cap(30.0, [], 3, 1.25, 2.8, 16.0) == 16.0
-    # ...nor does a mis-set floor above the envelope.
-    assert traffic_speed_cap(30.0, [0.0] * 8, 3, 1.25, 25.0, 16.0) == 16.0
     assert looming_rate(10.0, 0.0, dt=0.1) == 0.0
 
 
@@ -1074,6 +1041,77 @@ def test_world_takes_an_origin_and_goal_override():
         assert params[name].default is None, (
             f"World.__init__ {name} must default to None so config.yaml "
             f"stays the fallback")
+
+
+def _route_distance_fixture(route_len, anchor, edge_pos, crow_flies,
+                            last_route):
+    """A World with only the fields `_route_distance_now` reads.
+
+    Built with `__new__` rather than `World(...)`: the real constructor
+    launches a SUMO subprocess and parses an 862 MB network, and none of
+    that has any bearing on the arithmetic under test here.
+    """
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.92143, lon=77.63576)
+    world.state.edge_pos = edge_pos
+    world.state.distance_to_goal_m = crow_flies
+    world._route_length_m = route_len
+    world._route_anchor_pos = anchor
+    world._last_route_m = last_route
+    return world
+
+
+def test_route_distance_holds_its_units_through_a_routing_failure():
+    """A routing failure must not silently republish crow-flies metres.
+
+    The regression, measured on the 2026-09-19 twisty run: that route is
+    2,398 m along roads to cover 502 m direct, a 4.8x ratio because it is a
+    one-way loop system. `findRoute` failed once mid-episode and the
+    published route distance became the crow-flies 536 m, which everything
+    downstream read as 1,862 m of progress in a single frame. The harness
+    duly reported "closed 1862 m of route" for an episode that travelled
+    790 m in total.
+
+    Holding the last known route distance is the fix. Going stale is the
+    correct failure mode; changing units is not.
+    """
+    # A live route, 2,398 m, fly at the start of its edge.
+    world = _route_distance_fixture(2398.0, 0.0, 0.0, 502.0, None)
+    assert world.route_valid
+    assert world._route_distance_now() == 2398.0
+
+    # 100 m along the edge: route distance falls by exactly that.
+    world.state.edge_pos = 100.0
+    assert world._route_distance_now() == 2298.0
+
+    # findRoute fails. Crow-flies has meanwhile closed to 536 m -- the exact
+    # value that produced the 1,862 m artifact.
+    world._route_length_m = None
+    world.state.distance_to_goal_m = 536.0
+    assert not world.route_valid
+    assert world._route_distance_now() == 2298.0, (
+        "a routing failure republished the crow-flies distance as a route "
+        "distance -- this is the 1,862 m bug")
+
+    # Recovery: a fresh, shorter route measured from the current edge.
+    world._route_length_m = 2200.0
+    world._route_anchor_pos = 100.0
+    assert world.route_valid
+    assert world._route_distance_now() == 2200.0
+
+
+def test_route_distance_seeds_from_crow_flies_before_any_route():
+    """Before the first route resolves there is nothing to hold.
+
+    Crow-flies is a legitimate *starting* value in that window -- what it
+    must never be is a mid-episode substitute. `route_valid` is what tells
+    the two apart from outside.
+    """
+    world = _route_distance_fixture(None, 0.0, 0.0, 502.0, None)
+    assert not world.route_valid
+    assert world._route_distance_now() == 502.0
 
 
 def main() -> int:

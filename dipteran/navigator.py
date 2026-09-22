@@ -562,7 +562,7 @@ def telemetry(out: MotorOutput, *, lat: float, lon: float, heading: float,
               horn: float = 0.0, event: str | None = None,
               fov_deg: float = 120.0, fov_radius_m: float = 60.0,
               heading_error_deg: float = 0.0, wrong_way_ms: float = 0.0,
-              speed_cap_ms: float = 0.0, steer_filtered: float = 0.0) -> dict:
+              steer_filtered: float = 0.0) -> dict:
     """The JSON payload schema the HUD consumes.
 
     Extends the mock's fields rather than replacing them, so index.html's
@@ -610,9 +610,6 @@ def telemetry(out: MotorOutput, *, lat: float, lon: float, heading: float,
         # Positive when the remaining route distance is growing -- what the
         # wrong-way punishment reads.
         "wrong_way_ms": round(wrong_way_ms, 2),
-        # What the road and its traffic allow right now, as opposed to the
-        # vehicle's absolute envelope.
-        "speed_cap_ms": round(speed_cap_ms, 2),
         # What the vehicle actually steers on: `steer` above is one frame of
         # a one-neuron-per-side readout, this is that readout low-passed.
         "steer_filtered": round(steer_filtered, 4),

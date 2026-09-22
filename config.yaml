@@ -271,15 +271,3 @@ vehicle:
   # 49-edge route through a one-way grid jumped every few seconds and took
   # the bearing with it. Short values are twitchy, long ones cut corners.
   route_lookahead_m: 45.0
-
-  # Speed cap from the road rather than from one global number. The lane's
-  # own SUMO speed limit is the ceiling; when at least traffic_min_vehicles
-  # neighbours sit within traffic_sample_m, their mean speed times
-  # traffic_speed_margin caps it further. Silk Board in gridlock therefore
-  # holds the fly to roughly the crawl everything around it is doing, while
-  # an empty inner road leaves it the full lane limit. Tune against how the
-  # traffic looks -- none of these four is measured.
-  traffic_sample_m: 80.0
-  traffic_min_vehicles: 3
-  traffic_speed_margin: 1.25
-  min_speed_cap_ms: 2.8

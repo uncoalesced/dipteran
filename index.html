@@ -162,10 +162,6 @@
           <span id="nav-steer" class="text-neutral-200 tabular-nums">0.000</span>
         </div>
         <div class="flex justify-between">
-          <span class="text-neutral-400">Speed cap</span>
-          <span id="nav-cap" class="text-neutral-200 tabular-nums">-- m/s</span>
-        </div>
-        <div class="flex justify-between">
           <span class="text-neutral-400">Wrong way</span>
           <span id="nav-wrong" class="text-neutral-200 tabular-nums">0.0 m/s</span>
         </div>
@@ -621,7 +617,6 @@
     const barPanic = document.getElementById('bar-panic');
     const navError = document.getElementById('nav-error');
     const navSteer = document.getElementById('nav-steer');
-    const navCap = document.getElementById('nav-cap');
     const navWrong = document.getElementById('nav-wrong');
     const badge = document.getElementById('badge');
     const stateTitle = document.getElementById('state-title');
@@ -721,9 +716,6 @@
         const sv = typeof data.steer_filtered === 'number'
           ? data.steer_filtered : data.steer;
         navSteer.textContent = (sv > 0 ? '+' : '') + sv.toFixed(3);
-      }
-      if (typeof data.speed_cap_ms === 'number') {
-        navCap.textContent = `${data.speed_cap_ms.toFixed(1)} m/s`;
       }
       if (typeof data.wrong_way_ms === 'number') {
         const w = data.wrong_way_ms;

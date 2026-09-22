@@ -194,25 +194,6 @@ class Vehicle(BaseModel):
     # corners across whatever sits between it and the target.
     route_lookahead_m: float = Field(default=45.0, gt=0.0)
 
-    # `max_speed_ms` is the vehicle's envelope; these four turn it into the
-    # speed the *road* allows at this moment -- the lane's own limit, pulled
-    # down to what the surrounding traffic is actually doing. Unmeasured
-    # starting values: they are knobs to tune against how the traffic looks,
-    # not numbers off a dataset.
-    #
-    # Neighbours within this radius are "the traffic here".
-    traffic_sample_m: float = Field(default=80.0, gt=0.0)
-    # Fewer neighbours than this and there is no jam to speak of, so the
-    # lane's own limit stands unmodified.
-    traffic_min_vehicles: int = Field(default=3, ge=1)
-    # How much faster than the surrounding traffic the fly may travel. Above
-    # 1.0 because a fly-sized vehicle filters the way a two-wheeler does
-    # rather than queueing in lane.
-    traffic_speed_margin: float = Field(default=1.25, gt=0.0)
-    # Floor under the traffic cap: a standstill jam should still leave the
-    # fly picking its way through at walking pace, not frozen.
-    min_speed_cap_ms: float = Field(default=2.8, gt=0.0)
-
 
 class Snn(BaseModel):
     """LIF and reinforcement parameters.
