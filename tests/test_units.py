@@ -1168,6 +1168,70 @@ def test_route_distance_refuses_an_anchor_from_another_edge():
     assert world._route_distance_now() == 1500.0
 
 
+def test_reset_episode_seeds_the_ratchet_in_route_metres():
+    """Episode 2 onward must start measuring in the same units as episode 1.
+
+    `_spawn_ego` resolves the origin with `_road_edge_near`, which searches
+    outward past junctions to a normal edge. `reset_episode` used raw
+    `_edge_at`, which at the test routes' origins answers with an internal
+    junction edge. `_update_route` early-returns on those, no route resolves,
+    and `_route_distance_now` falls back to its crow-flies seed.
+
+    Measured across every multi-episode run on record: episode 1 starts its
+    route ratchet at 658.5 m (500 m route) / 2,397.7 m (twisty) -- route
+    metres -- and **all 20 later episodes** start at exactly 426.0 / 502.2 m,
+    the crow-flies distance. So `rewards()`'s `best_distance_m` was seeded
+    4.8x too tight on the twisty route in every episode after the first --
+    the failure mode c8fc19c describes and set out to fix, still live through
+    the edge lookup that feeds it -- and `closed_route_m` for those episodes
+    was a crow-flies start minus a route minimum.
+    """
+    from types import SimpleNamespace
+
+    from dipteran.world import ROUTE_RETRY_FRAMES, VehicleState, World
+
+    origin, goal = (12.92143, 77.63576), (12.92581, 77.63463)
+    route_len = 2398.0
+
+    def convert_road(lon, lat, isGeo=True, vClass="passenger"):
+        # The origin itself sits in a junction; a few metres off it does not.
+        if (lat, lon) == origin:
+            return ":cluster_0_0", 1.5, 0
+        return "310456161", 4.0, 0
+
+    def find_route(frm, to):
+        assert not frm.startswith(":"), "findRoute asked to route from a junction"
+        return SimpleNamespace(edges=[frm, "27789866#2"], length=route_len)
+
+    world = World.__new__(World)
+    world.origin, world.goal = origin, goal
+    world.state = VehicleState(lat=12.9250, lon=77.6340)   # wherever ep 1 ended
+    world.traci = SimpleNamespace(
+        simulation=SimpleNamespace(convertRoad=convert_road,
+                                   convertGeo=lambda *a, **k: (0.0, 0.0),
+                                   findRoute=find_route),
+        vehicle=SimpleNamespace(moveToXY=lambda *a, **k: None,
+                                setSpeed=lambda *a, **k: None))
+    world.v = SimpleNamespace(steer_calibration_s=2.0)
+    world.step_length = 0.1
+    world._goal_edge = "27789866#2"
+    world._route_retry = ROUTE_RETRY_FRAMES
+    world._no_route_frames = 0
+
+    world.reset_episode()
+
+    crow = world.state.distance_to_goal_m
+    assert 500.0 < crow < 505.0, crow        # the 502.2 m the runs recorded
+    assert world.route_valid, (
+        "no live route after reset -- the origin resolved to a junction edge")
+    assert world.state.route_distance_to_goal_m == route_len, (
+        f"reset seeded {world.state.route_distance_to_goal_m:.1f} m; the "
+        f"crow-flies distance is {crow:.1f} m and the route is {route_len} m")
+    assert world.best_distance_m == route_len, (
+        "the rewards() ratchet started in crow-flies metres -- 4.8x too "
+        "tight on this route, so progress could not earn dopamine")
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]

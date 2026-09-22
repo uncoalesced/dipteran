@@ -1356,7 +1356,18 @@ class World:
         except Exception:
             pass
 
-        edge, pos, _lane = self._edge_at(s.lat, s.lon)
+        # `_road_edge_near`, not raw `_edge_at`: the same lookup `_spawn_ego`
+        # uses for episode 1. At the test routes' origins raw `_edge_at`
+        # answers with an internal junction edge, `_update_route` refuses to
+        # route from one, and the seed below fell back to crow-flies. Measured
+        # on every multi-episode run on record: episode 1 started its ratchet
+        # in route metres and all 20 later episodes at exactly the crow-flies
+        # distance (426.0 m on the 500 m route, 502.2 m on the twisty one) --
+        # so `rewards()` was 4.8x too tight on the twisty route in every
+        # episode after the first, which is the failure the comment below
+        # describes as fixed. It was fixed for the fallback, not for the edge
+        # lookup that feeds it.
+        edge, pos, _lane = self._road_edge_near(s.lat, s.lon)
         s.edge = edge
         s.edge_pos = pos
 
