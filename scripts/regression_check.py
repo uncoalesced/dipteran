@@ -171,8 +171,15 @@ def main() -> int:
             if rerun(name, spec, fresh):
                 result = fresh
             else:
-                print(f"[regression] {name} did not complete; "
-                      f"falling back to {spec['source']}")
+                # Not a fallback to the baseline: diffing the on-record file
+                # against its own `expect` prints a column of "ok" and drops
+                # the crash from the summary. The 1b52eb7 roster did exactly
+                # that for a run killed by run_route's closed-route assertion.
+                print(f"[regression] {name} did not complete -- no fresh "
+                      f"result to compare")
+                findings.append(f"{name}: re-run did not complete -- no "
+                                f"fresh result")
+                continue
 
         if not result.exists():
             print(f"    no result file at {result} -- nothing to compare")
