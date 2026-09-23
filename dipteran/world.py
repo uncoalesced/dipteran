@@ -954,6 +954,15 @@ class World:
         """
         remaining = max(1.0, lookahead_m)
         for index, edge in enumerate(self._route_edges):
+            if index == 0 and self.state.edge.startswith(":"):
+                # Inside a junction the fly has already left the route's
+                # first edge -- `_update_route` does not re-route from
+                # internal edges, so the route still starts with the edge
+                # behind it. Measured from that edge's start, the lookahead
+                # pointed back the way the fly came: 31-56% of junction
+                # frames had the target over 120 degrees off in three live
+                # arrival recordings, against 0-15% on normal edges.
+                continue
             shape = self._lane_shape(edge)
             if shape is None or len(shape) < 2:
                 continue

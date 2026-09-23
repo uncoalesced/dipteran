@@ -1374,6 +1374,40 @@ def test_route_seed_settles_on_the_edge_the_fly_drives():
     assert world.start_route_m == world.best_distance_m == 535.5
 
 
+def test_pursuit_target_stays_ahead_through_a_junction():
+    """On a junction edge the fly has already left the route's first edge.
+
+    `_route_point_ahead` skipped `edge_pos` into the first route edge only
+    while the fly stood *on* it. Inside a junction `state.edge` is the
+    internal `:cluster_...` edge, so the skip was zero and the lookahead was
+    measured from the start of the edge the fly had just driven -- a target
+    behind it. Measured on three live arrival recordings (a37cda7 and
+    de4d8e2): 31-56% of junction frames had the target more than 120
+    degrees off the heading, against 0-15% of frames on normal edges. Every
+    junction crossing told the fly to turn round.
+    """
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.93, lon=77.62)
+    # Route A then B along the x axis; A ends where the junction starts.
+    world._route_edges = ["A", "B"]
+    world._lane_shapes = {"A": [(0.0, 0.0), (100.0, 0.0)],
+                          "B": [(106.0, 0.0), (300.0, 0.0)]}
+
+    # Out of A, a few metres into the junction between A and B.
+    world.state.edge, world.state.edge_pos = ":J_0", 3.0
+    x, y = world._route_point_ahead(45.0)
+    assert x > 100.0, (
+        f"inside the junction the pursuit target is at x={x:.1f}, back on "
+        f"the edge the fly just left (A ends at x=100) -- a turn-round cue")
+    assert (x, y) == (151.0, 0.0), (x, y)   # 45 m into B
+
+    # On A itself the target still counts from where the fly stands.
+    world.state.edge, world.state.edge_pos = "A", 80.0
+    assert world._route_point_ahead(45.0) == (131.0, 0.0)
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]
