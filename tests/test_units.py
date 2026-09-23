@@ -1296,6 +1296,84 @@ def test_route_distance_counts_from_the_fly_not_the_edge_start():
         f"best that pays progress dopamine for nothing")
 
 
+def test_route_seed_settles_on_the_edge_the_fly_drives():
+    """The spawn's edge is a lookup; the seed belongs to the edge driven.
+
+    Both test routes' origins sit inside junctions, so `_road_edge_near`
+    resolves them by searching outward -- clockwise from north, first normal
+    edge wins -- and routes are one-directional. Traced on the 500 m route
+    (2026-09-23): the lookup gives `38042287#0`, 658.4 m to the goal around a
+    loop of four more edges. The fly, pointed at the goal, is on `1150874214`
+    after 0.7 m of travel, 535.6 m out. That 122.8 m drop on 0.7 m driven was
+    a new best -- progress dopamine at the start of every episode -- and
+    run_route's closure ran ~120 m ahead of the distance driven until its
+    assertion caught it: "episode 1 closed 383.3 m of route on 268.6 m
+    travelled".
+    """
+    from types import SimpleNamespace
+
+    from dipteran.world import ROUTE_RETRY_FRAMES, VehicleState, World
+
+    origin, goal = (12.93143, 77.62261), (12.92760, 77.62251)
+    # Lengths from each edge's start, as findRoute gives them.
+    length_from = {"38042287#0": 658.5, "1150874214": 535.75}
+
+    def convert_road(lon, lat, isGeo=True, vClass="passenger"):
+        # The origin itself is in a junction; the search north of it finds
+        # the lookup edge.
+        if (lat, lon) == origin:
+            return ":cluster_1620344798_304771894_0", 8.75, 0
+        return "38042287#0", 0.25, 0
+
+    world = World.__new__(World)
+    world.origin, world.goal = origin, goal
+    world.state = VehicleState(lat=12.9281, lon=77.6213)   # last episode's end
+    world.traci = SimpleNamespace(
+        simulation=SimpleNamespace(
+            convertRoad=convert_road,
+            convertGeo=lambda *a, **k: (0.0, 0.0),
+            findRoute=lambda frm, to: SimpleNamespace(
+                edges=[frm, "-27785750"], length=length_from[frm])),
+        vehicle=SimpleNamespace(moveToXY=lambda *a, **k: None,
+                                setSpeed=lambda *a, **k: None))
+    world.v = SimpleNamespace(steer_calibration_s=2.0)
+    world.step_length = 0.1
+    world._goal_edge = "-27785750"
+    world._route_retry = ROUTE_RETRY_FRAMES
+    world._no_route_frames = 0
+
+    def frame(edge, pos, travelled):
+        s = world.state
+        s.edge, s.edge_pos, s.travelled_m = edge, pos, travelled
+        world._update_route()
+        s.route_distance_to_goal_m = world._route_distance_now()
+        world._settle_route_seed()
+        return s.route_distance_to_goal_m
+
+    world.reset_episode()
+    assert world.start_route_m == 658.25 and not world.route_seeded, (
+        "the spawn's route distance is a lookup and must stay provisional")
+
+    # The calibration blink: parked on the lookup edge, nothing driven yet.
+    frame("38042287#0", 0.25, 0.0)
+    assert not world.route_seeded
+
+    # 0.7 m later `_pull_to_road` has the fly on the edge it really drives.
+    here = frame("1150874214", 0.25, 0.7)
+    assert here == 535.5
+    assert world.route_seeded
+    assert (world.start_route_m == world.best_distance_m
+            == world._prev_route_m == 535.5), (
+        f"the 122.75 m between the lookup edge's route and the driven edge's "
+        f"was left in the seed (start {world.start_route_m:.2f}, best "
+        f"{world.best_distance_m:.2f}) -- progress dopamine and closure for "
+        f"0.7 m of driving")
+
+    # From here on a drop is progress again: the seed does not follow it.
+    assert frame("1150874214", 20.25, 20.7) == 515.5
+    assert world.start_route_m == world.best_distance_m == 535.5
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]

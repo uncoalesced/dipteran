@@ -89,8 +89,11 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
         episodes: list[dict] = []
         episode_frames = 0
         episode_start_m = distance_start
-        episode_start_route_m = s.route_distance_to_goal_m
-        route_min = s.route_distance_to_goal_m
+        # Best route distance this episode, counted only once the route seed
+        # has settled on the edge the fly drives. Closure is measured from
+        # that settled start, `world.start_route_m`, not from the spawn's
+        # lookup edge -- see `World._settle_route_seed`.
+        route_min = float("inf")
         # Frames this episode spent with no live road route. Recorded because
         # a closure figure measured across a routing outage used to be a
         # different quantity from one measured without -- see
@@ -187,7 +190,8 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                 events["loom"] += 1
             stall_peak = max(stall_peak, s.stalled_s)
             distance_min = min(distance_min, s.distance_to_goal_m)
-            route_min = min(route_min, s.route_distance_to_goal_m)
+            if world.route_seeded:
+                route_min = min(route_min, s.route_distance_to_goal_m)
             if not world.route_valid:
                 episode_no_route_frames += 1
                 if s.edge.startswith(":"):
@@ -207,7 +211,9 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
             if episode_over:
                 hit = s.distance_to_goal_m <= ARRIVAL_M
                 arrived = arrived or hit
-                closed_route = episode_start_route_m - route_min
+                # An episode that never settled closed nothing measurable.
+                route_min = min(route_min, world.start_route_m)
+                closed_route = world.start_route_m - route_min
                 # You cannot close more route than you drove. This is not a
                 # style assertion: the 2026-09-19 twisty run reported closing
                 # 1,862 m of route in an episode that travelled 790 m, and
@@ -257,8 +263,7 @@ def run(cfg, max_minutes: float, progress_every: float, realtime: bool,
                 episode_frames = 0
                 episode_start_m = s.distance_to_goal_m
                 distance_min = s.distance_to_goal_m
-                episode_start_route_m = s.route_distance_to_goal_m
-                route_min = s.route_distance_to_goal_m
+                route_min = float("inf")
                 episode_no_route_frames = 0
                 episode_internal_edge_frames = 0
                 continue

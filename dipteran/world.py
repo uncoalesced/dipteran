@@ -401,6 +401,10 @@ class World:
         # state carried before it: reading the difference as a frame's worth
         # of movement would punish the fly for existing.
         self._prev_route_m = self.state.route_distance_to_goal_m
+        # All three seeds are provisional until the fly is on the edge it
+        # actually drives -- see `_settle_route_seed`.
+        self.start_route_m = self.state.route_distance_to_goal_m
+        self.route_seeded = False
         # The one line that tells "routing works" apart from "routing
         # silently fell back to the bee-line" -- from outside they look
         # identical, because both just steer at something.
@@ -601,6 +605,7 @@ class World:
         # only fixes what the compass is allowed to say, not who acts on it.
         self._update_route()
         s.route_distance_to_goal_m = self._route_distance_now()
+        self._settle_route_seed()
         target_lat, target_lon = self._route_target()
 
         # Odour beacon: PLAN.md's inverse gradient, normalised so it saturates
@@ -851,6 +856,38 @@ class World:
             self._last_route_m = route_m
         return (self._last_route_m if self._last_route_m is not None
                 else self.state.distance_to_goal_m)
+
+    def _settle_route_seed(self) -> None:
+        """Re-seed the episode's route distance from the edge the fly drives.
+
+        The spawn's edge is a lookup, not an observation. Both test routes'
+        origins sit inside junctions, where `_road_edge_near` searches
+        outward -- clockwise from north, first normal edge wins -- and routes
+        run one way, so the edge it lands on can be much further from the
+        goal than the one the fly takes. Traced on the 500 m route: the
+        lookup gives `38042287#0`, 658.4 m to the goal around a loop of four
+        more edges; the fly, pointed at the goal, is on `1150874214` after
+        0.7 m of travel, 535.6 m out. That 122.8 m drop on 0.7 m driven was a
+        new best, so `rewards()` paid it as progress at the start of every
+        episode, the wrong-way average went deeply negative, and run_route's
+        closure ran ~120 m ahead of the distance driven until its assertion
+        caught it: "episode 1 closed 383.3 m of route on 268.6 m travelled".
+
+        So the seed is provisional until the first live route measured after
+        the fly has moved -- `travelled_m` only grows after `_pull_to_road`
+        has assigned an edge from where the fly really is -- and that one
+        measurement re-seeds the episode start, the reward ratchet and the
+        wrong-way baseline together. Anything driven inside the junction
+        before then is not counted as closure: a few metres, and
+        under-claiming is the safe direction.
+        """
+        s = self.state
+        if self.route_seeded or s.travelled_m <= 0.0 or not self.route_valid:
+            return
+        self.route_seeded = True
+        self.start_route_m = s.route_distance_to_goal_m
+        self.best_distance_m = s.route_distance_to_goal_m
+        self._prev_route_m = s.route_distance_to_goal_m
 
     @property
     def route_valid(self) -> bool:
@@ -1396,6 +1433,10 @@ class World:
         # moved anywhere yet, and the jump from wherever the last one ended
         # back to the origin is a teleport, not a wrong turn.
         self._prev_route_m = s.route_distance_to_goal_m
+        # Provisional, as at spawn: the lookup above picks *an* edge near the
+        # origin, not necessarily the one the fly drives off on.
+        self.start_route_m = s.route_distance_to_goal_m
+        self.route_seeded = False
         self._away_ema = 0.0
         self._wrong_way_pulse = 0.0
         self._wrong_way_cooldown = 0.0
