@@ -1,6 +1,7 @@
 {
   "_note": "Baselines for scripts/regression_check.py. `expect` is computed by regression_check.metrics() over the file named in `source`, so the two cannot disagree. This is not a pass/fail bar -- PLAN.md section 9 rejected arrival as one. It records what was measured so a later run that moves can be noticed.",
   "_caveat_no_route_frames": "Runs recorded before 2026-09-22 count `no_route_frames` as routing failures only. From the route-anchor fix onward they also count junction transits, reported separately as `internal_edge_frames`. The two are not directly comparable across that boundary.",
+  "_caveat_closed_route_m": "Runs recorded before de4d8e2 (2026-09-23) seed `closed_route_m` from the spawn's lookup edge: at a junction origin, whichever normal edge `_road_edge_near` finds first clockwise from north, not necessarily the one the fly drives. On the 500 m route that inflated every episode's closure by ~123 m; on the twisty route the two edges coincide. From de4d8e2 the seed settles on the first edge the moving fly is on. Not comparable across that boundary.",
   "routes": {
     "oneturn_500m": {
       "description": "500 m, one turn over 45 degrees, 10 edges",
@@ -9,23 +10,25 @@
       "episodes": 15,
       "episode_minutes": 2.0,
       "max_minutes": 45.0,
-      "source": "runs/oneturn_500m_2026-09-19.json",
-      "recorded": "2026-09-19",
+      "source": "runs/oneturn_500m_2026-09-23.json",
+      "recorded": "2026-09-23",
       "caveats": [
-        "predates closed_route_m / no_route_frames -- those are null",
-        "the project's only evidence that the carried plastic weights do anything: frames-to-arrival fell 857 -> ~730"
+        "re-seeded on de4d8e2; the previous baseline, runs/oneturn_500m_2026-09-19.json, predates closed_route_m and no_route_frames",
+        "settled route start 535.6 m in all 15 episodes; the spawn's lookup edge reads 658 m",
+        "heading error median 24.8 deg here against 10.7 deg on a37cda7 (runs/oneturn_500m_2026-09-22pm.json), unexplained -- see SESSION_2026-09-23.md",
+        "the project's only evidence that the carried plastic weights do anything: frames-to-arrival fell 857 -> ~730 on 2026-09-19"
       ],
       "expect": {
-        "episodes_arrived": 11,
+        "episodes_arrived": 13,
         "episode_count": 15,
-        "frames_to_arrival_mean": 790.818,
-        "closed_route_m_mean": null,
-        "heading_error_abs_median": 21.6,
-        "steer_sign_agreement": 0.649,
-        "no_route_frames_mean": null,
-        "internal_edge_frames_mean": null,
-        "travelled_m": 192.3,
-        "plastic_drift_relative": 0.000309
+        "frames_to_arrival_mean": 843.077,
+        "closed_route_m_mean": 248.147,
+        "heading_error_abs_median": 24.8,
+        "steer_sign_agreement": 0.664,
+        "no_route_frames_mean": 165.533,
+        "internal_edge_frames_mean": 162.267,
+        "travelled_m": 361.2,
+        "plastic_drift_relative": 0.000422
       }
     },
     "twisty_2400m": {
@@ -35,23 +38,24 @@
       "episodes": 3,
       "episode_minutes": 6.0,
       "max_minutes": 25.0,
-      "source": "runs/twisty_2400m_2026-09-22.json",
-      "recorded": "2026-09-22",
+      "source": "runs/twisty_2400m_2026-09-23.json",
+      "recorded": "2026-09-23",
       "caveats": [
-        "never closed: best honest closure on record is 416.6 m of 2,398 m",
-        "four edges on this route are sinks with no outgoing connections (310456191, 310456195, 310456204, 794624007) -- confirmed offline, present in the right-hand network too"
+        "never arrived: best honest closure on record is 566 m of 2,398 m (episode 2 of this run)",
+        "four edges on this route are sinks with no outgoing connections (310456191, 310456195, 310456204, 794624007) -- confirmed offline, present in the right-hand network too",
+        "heading error median 34.9 deg here and 35.1 deg on 1b52eb7, against 18.1 and 27.3 deg before episodes 2+ were route-seeded, unexplained -- see SESSION_2026-09-23.md"
       ],
       "expect": {
         "episodes_arrived": 0,
         "episode_count": 3,
         "frames_to_arrival_mean": null,
-        "closed_route_m_mean": 146.6,
-        "heading_error_abs_median": 27.3,
-        "steer_sign_agreement": 0.724,
-        "no_route_frames_mean": 469.667,
-        "internal_edge_frames_mean": null,
-        "travelled_m": 1062.2,
-        "plastic_drift_relative": 0.000451
+        "closed_route_m_mean": 413.233,
+        "heading_error_abs_median": 34.9,
+        "steer_sign_agreement": 0.623,
+        "no_route_frames_mean": 997,
+        "internal_edge_frames_mean": 903.333,
+        "travelled_m": 839.3,
+        "plastic_drift_relative": 0.000821
       }
     }
   }
