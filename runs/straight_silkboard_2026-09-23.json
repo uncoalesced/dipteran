@@ -1,0 +1,79 @@
+{
+  "arrived": true,
+  "episodes": [
+    {
+      "episode": 1,
+      "arrived": true,
+      "frames": 985,
+      "closed_m": 366.3,
+      "closed_route_m": 381.0,
+      "best_route_m": 199.6,
+      "best_distance_m": 199.8,
+      "travelled_m": 380.8,
+      "no_route_frames": 9,
+      "internal_edge_frames": 8,
+      "plastic_drift": 0.000154
+    }
+  ],
+  "episode_count": 1,
+  "episodes_arrived": 1,
+  "closed_m_first_third": null,
+  "closed_m_last_third": null,
+  "origin": [
+    12.91802,
+    77.62284
+  ],
+  "goal": [
+    12.91723,
+    77.628
+  ],
+  "frames": 985,
+  "sim_seconds": 98.5,
+  "wall_seconds": 182.4,
+  "startup_seconds": 101.7,
+  "loop_seconds": 80.7,
+  "realtime_factor": 1.22,
+  "realtime_paced": false,
+  "distance_start_m": 566.1,
+  "distance_end_m": 199.8,
+  "distance_min_m": 199.8,
+  "closed_m": 366.3,
+  "travelled_m": 380.8,
+  "edges_visited": 4,
+  "final_edge": "1301808818",
+  "off_network_frames": 0,
+  "off_road_m_median": 0.36,
+  "off_road_m_max": 0.95,
+  "speed_ms_median": 4.09,
+  "speed_ms_max": 5.069,
+  "steer_abs_median": 0.011,
+  "steer_abs_max": 0.269,
+  "heading_error_abs_median": 10.4,
+  "heading_error_abs_p90": 25.4,
+  "steer_sign_agreement": 0.547,
+  "steer_sign_votes": 490,
+  "panic_frames": 0,
+  "pothole_frames": 2,
+  "stall_peak_s": 0.0,
+  "events": {
+    "pothole": 2
+  },
+  "states": {
+    "IDLE DRIFT": 952,
+    "POTHOLE IMPACT": 2,
+    "ODOR TRACKING": 31
+  },
+  "plastic_drift_relative": 0.000154,
+  "plastic_finite": true,
+  "plastic_synapses": 115849,
+  "frames_per_s": 12.21,
+  "phase_ms_per_frame": {
+    "sense_ms": 1.04,
+    "snn_ms": 66.72,
+    "apply_ms": 10.08,
+    "step_ms": 3.3
+  },
+  "background_vehicles": 244,
+  "min_syn_count": 0,
+  "gain": 16.0
+}
