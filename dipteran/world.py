@@ -350,10 +350,9 @@ class World:
         self._route_edge: str | None = None
         self._route_edges: list[str] = []
         self._route_length_m: float | None = None
-        self._route_anchor_pos: float = 0.0
-        # Which edge `_route_anchor_pos` was measured on. `edge_pos` is a
-        # position *along one edge*, so subtracting an anchor taken on a
-        # different edge is comparing two unrelated rulers -- see
+        # Which edge `_route_length_m` was measured from. `edge_pos` is a
+        # position *along one edge*, so subtracting it from a length measured
+        # from a different edge is comparing two unrelated rulers -- see
         # `_route_distance_m`.
         self._route_anchor_edge: str | None = None
         self._route_retry: int = 0
@@ -715,7 +714,6 @@ class World:
             if stage.edges:
                 self._route_edges = list(stage.edges)
                 self._route_length_m = stage.length
-                self._route_anchor_pos = self.state.edge_pos
                 self._route_anchor_edge = edge
                 self._no_route_frames = 0
             else:
@@ -774,24 +772,36 @@ class World:
         what callers should read. Substituting one for the other is what
         produced this project's most misleading number to date.
 
-        The anchor is only meaningful against the edge it was measured on.
-        `edge_pos` is a position along *one* edge, so `edge_pos - anchor`
-        across two different edges subtracts two unrelated rulers. That is
-        reachable every time the fly crosses a junction: `_pull_to_road`
-        sets `state.edge` from raw `_edge_at`, which answers with an
-        internal `:cluster_...` edge inside a junction (the same behaviour
-        `_road_edge_near` exists to work around), while `_update_route`
-        early-returns on those and leaves the anchor pointing at the edge
-        before the junction.
+        `findRoute`'s length runs from the *start* of the edge it was asked
+        from -- SUMO sums every edge's full length, the first one included
+        -- so what is left is that length minus how far along the edge the
+        fly now stands. `_route_point_ahead` has always measured the route
+        this way. This used to subtract only the distance moved since the
+        route was found, which overstated every route found partway along an
+        edge by the position it was found at: every spawn and every
+        `reset_episode`, since an origin is wherever the click landed. On
+        the 500 m route that was ~118 m, dropped in one frame at the first
+        edge change -- a new best, so progress dopamine for ground never
+        driven, and a `closed_route_m` 118 m over the truth.
 
-        Measured on the synthetic repro: route 2,000 m, anchor 0 on edge A,
-        fly 400 m along A (1,600 m remaining), then one frame on a junction
-        edge at `edge_pos` 2.0 -- published distance jumped to 1,998 m. A
-        398 m backward step in one 0.1 s frame reads as 3,980 m/s of
-        driving away from the goal, and `_punishments` fires PPL1 on
-        anything over `snn.wrong_way_threshold_ms` (0.5), saturating a
-        detector whose full scale is 4.0 m/s. `rewards()` is unaffected --
-        its gate is a *new best*, and a backward jump never sets one.
+        The length is only meaningful against the edge it was measured
+        from. `edge_pos` is a position along *one* edge, so subtracting it
+        from a length measured from another subtracts two unrelated rulers.
+        That is reachable every time the fly crosses a junction:
+        `_pull_to_road` sets `state.edge` from raw `_edge_at`, which answers
+        with an internal `:cluster_...` edge inside a junction (the same
+        behaviour `_road_edge_near` exists to work around), while
+        `_update_route` early-returns on those and leaves the length
+        measured from the edge before the junction.
+
+        Measured on the synthetic repro: route 2,000 m, fly 400 m along edge
+        A (1,600 m remaining), then one frame on a junction edge at
+        `edge_pos` 2.0 -- published distance jumped to 1,998 m. A 398 m
+        backward step in one 0.1 s frame reads as 3,980 m/s of driving away
+        from the goal, and `_punishments` fires PPL1 on anything over
+        `snn.wrong_way_threshold_ms` (0.5), saturating a detector whose full
+        scale is 4.0 m/s. `rewards()` is unaffected -- its gate is a *new
+        best*, and a backward jump never sets one.
 
         Refusing to answer is the right failure mode here for the same
         reason it is in `_route_failed`: `_route_distance_now` holds the
@@ -800,8 +810,7 @@ class World:
         if (self._route_length_m is None
                 or self.state.edge != self._route_anchor_edge):
             return None
-        travelled = max(0.0, self.state.edge_pos - self._route_anchor_pos)
-        return max(0.0, self._route_length_m - travelled)
+        return max(0.0, self._route_length_m - self.state.edge_pos)
 
     def _route_distance_now(self) -> float:
         """The route distance to publish this frame, in route metres.

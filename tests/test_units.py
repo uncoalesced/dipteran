@@ -1043,17 +1043,18 @@ def test_world_takes_an_origin_and_goal_override():
             f"stays the fallback")
 
 
-def _route_distance_fixture(route_len, anchor, edge_pos, crow_flies,
-                            last_route, edge="-123624220#4"):
+def _route_distance_fixture(route_len, edge_pos, crow_flies, last_route,
+                            edge="-123624220#4"):
     """A World with only the fields `_route_distance_now` reads.
 
     Built with `__new__` rather than `World(...)`: the real constructor
     launches a SUMO subprocess and parses an 862 MB network, and none of
     that has any bearing on the arithmetic under test here.
 
-    The fly stands on the same edge the anchor was measured on, which is the
-    ordinary case. `test_route_distance_refuses_an_anchor_from_another_edge`
-    is what moves the two apart.
+    `route_len` is measured from the start of `edge`, as `findRoute`'s is.
+    The fly stands on that same edge, which is the ordinary case.
+    `test_route_distance_refuses_an_anchor_from_another_edge` is what moves
+    the two apart.
     """
     from dipteran.world import VehicleState, World
 
@@ -1063,7 +1064,6 @@ def _route_distance_fixture(route_len, anchor, edge_pos, crow_flies,
     world.state.edge_pos = edge_pos
     world.state.distance_to_goal_m = crow_flies
     world._route_length_m = route_len
-    world._route_anchor_pos = anchor
     world._route_anchor_edge = edge
     world._last_route_m = last_route
     return world
@@ -1084,7 +1084,7 @@ def test_route_distance_holds_its_units_through_a_routing_failure():
     correct failure mode; changing units is not.
     """
     # A live route, 2,398 m, fly at the start of its edge.
-    world = _route_distance_fixture(2398.0, 0.0, 0.0, 502.0, None)
+    world = _route_distance_fixture(2398.0, 0.0, 502.0, None)
     assert world.route_valid
     assert world._route_distance_now() == 2398.0
 
@@ -1101,11 +1101,11 @@ def test_route_distance_holds_its_units_through_a_routing_failure():
         "a routing failure republished the crow-flies distance as a route "
         "distance -- this is the 1,862 m bug")
 
-    # Recovery: a fresh, shorter route measured from the current edge.
+    # Recovery: a fresh, shorter route. `findRoute` measures it from the
+    # start of the edge, and the fly is still 100 m along that edge.
     world._route_length_m = 2200.0
-    world._route_anchor_pos = 100.0
     assert world.route_valid
-    assert world._route_distance_now() == 2200.0
+    assert world._route_distance_now() == 2100.0
 
 
 def test_route_distance_seeds_from_crow_flies_before_any_route():
@@ -1115,7 +1115,7 @@ def test_route_distance_seeds_from_crow_flies_before_any_route():
     must never be is a mid-episode substitute. `route_valid` is what tells
     the two apart from outside.
     """
-    world = _route_distance_fixture(None, 0.0, 0.0, 502.0, None)
+    world = _route_distance_fixture(None, 0.0, 502.0, None)
     assert not world.route_valid
     assert world._route_distance_now() == 502.0
 
@@ -1142,7 +1142,7 @@ def test_route_distance_refuses_an_anchor_from_another_edge():
     non-internal edge, so after a lap the guard compares against the
     *previous* edge and the recompute fires normally.)
     """
-    world = _route_distance_fixture(2000.0, 0.0, 400.0, 480.0, None,
+    world = _route_distance_fixture(2000.0, 400.0, 480.0, None,
                                     edge="-123624220#4")
     assert world.route_valid
     assert world._route_distance_now() == 1600.0
@@ -1160,7 +1160,6 @@ def test_route_distance_refuses_an_anchor_from_another_edge():
 
     # Out the far side: a fresh route, measured from the new edge.
     world._route_length_m = 1500.0
-    world._route_anchor_pos = 0.0
     world._route_anchor_edge = "27785733#1"
     world.state.edge = "27785733#1"
     world.state.edge_pos = 0.0
@@ -1224,12 +1223,77 @@ def test_reset_episode_seeds_the_ratchet_in_route_metres():
     assert 500.0 < crow < 505.0, crow        # the 502.2 m the runs recorded
     assert world.route_valid, (
         "no live route after reset -- the origin resolved to a junction edge")
-    assert world.state.route_distance_to_goal_m == route_len, (
+    # `convert_road` puts the fly 4 m along the resolved edge, and the route
+    # length is measured from that edge's start.
+    left = route_len - 4.0
+    assert world.state.route_distance_to_goal_m == left, (
         f"reset seeded {world.state.route_distance_to_goal_m:.1f} m; the "
-        f"crow-flies distance is {crow:.1f} m and the route is {route_len} m")
-    assert world.best_distance_m == route_len, (
+        f"crow-flies distance is {crow:.1f} m and the route is {left} m")
+    assert world.best_distance_m == left, (
         "the rewards() ratchet started in crow-flies metres -- 4.8x too "
         "tight on this route, so progress could not earn dopamine")
+
+
+def test_route_distance_counts_from_the_fly_not_the_edge_start():
+    """`findRoute`'s length runs from the *start* of the first edge.
+
+    SUMO sums every edge's full length, the first one included, so a route
+    asked for while the fly stands partway along its edge is longer than
+    what is left by exactly `edge_pos`. That is every spawn and every
+    `reset_episode`: the origin is wherever the click landed, not the start
+    of an edge. `_route_point_ahead` already knew this -- it skips `edge_pos`
+    into the first edge -- but the published distance did not.
+
+    Measured on the 500 m route: the origin sits ~118 m into its start edge,
+    so every episode started 118 m too far out and dropped by that much in
+    one frame at the first edge change. A drop is a new best, so `rewards()`
+    paid progress dopamine for ground never driven, and `closed_route_m` read
+    118 m over the truth. Once 1b52eb7 seeded episodes 2+ in route metres,
+    fast episodes closed more route than they drove and tripped run_route's
+    assertion: "episode 1 closed 386.0 m of route on 268.4 m travelled".
+    """
+    from types import SimpleNamespace
+
+    from dipteran.world import ROUTE_RETRY_FRAMES, VehicleState, World
+
+    # Edge A is 200 m long; the route is 1,000 m from A's start, 800 m from
+    # the start of B, the next edge along it.
+    length_from = {"A": 1000.0, "B": 800.0}
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.93143, lon=77.62261)
+    world.state.distance_to_goal_m = 426.0
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        findRoute=lambda frm, to: SimpleNamespace(
+            edges=[frm, "goal"], length=length_from[frm])))
+    world._goal_edge = "goal"
+    world._route_edge = None
+    world._route_edges = []
+    world._route_length_m = None
+    world._route_anchor_edge = None
+    world._route_retry = ROUTE_RETRY_FRAMES
+    world._no_route_frames = 0
+    world._last_route_m = None
+
+    # Spawned 118 m into A.
+    world.state.edge, world.state.edge_pos = "A", 118.0
+    world._update_route()
+    assert world._route_distance_now() == 882.0, (
+        f"spawned 118 m into the edge, published "
+        f"{world._route_distance_now():.1f} m -- the full route from the "
+        f"edge's start, not what is left of it")
+
+    # To the far end of A, then onto B: a fresh route from B's start.
+    world.state.edge_pos = 200.0
+    world._update_route()
+    before = world._route_distance_now()
+    world.state.edge, world.state.edge_pos = "B", 0.0
+    world._update_route()
+    after = world._route_distance_now()
+    assert before == after == 800.0, (
+        f"crossing onto the next edge moved the route distance "
+        f"{before:.1f} -> {after:.1f} m without driving a metre -- a new "
+        f"best that pays progress dopamine for nothing")
 
 
 def main() -> int:
