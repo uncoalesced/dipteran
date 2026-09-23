@@ -255,6 +255,11 @@ class VehicleState:
     lon: float
     heading: float = 0.0         # degrees clockwise from north
     speed: float = 0.0           # m/s
+    # Ground actually covered last frame, after `_pull_to_road`, per second.
+    # `speed` is what the motor asked for; the road pull can cancel most of
+    # it -- a fly pressed against a kerb reads 4 m/s here and moves 0.4. The
+    # senses that are about *achieved* motion read this one.
+    realised_speed_ms: float = 0.0
     edge: str = ""
     off_road_m: float = 0.0
     distance_to_goal_m: float = 0.0
@@ -636,14 +641,20 @@ class World:
 
         # Optic flow: what the fly is *actually* achieving, not what it asked
         # for. Zero flow with the throttle open is the gridlock signal.
-        flow = min(1.0, s.speed / self.v.max_speed_ms)
+        # Realised motion, not `s.speed`: the two only differ when the road
+        # pull is cancelling the motor, and that is exactly the case this
+        # channel exists for. Measured on the Silk Board trace, 2026-09-23:
+        # pinned against a roadside for 5,600+ frames at `s.speed` ~4 m/s
+        # and 0.4-0.5 m/s realised, T5 read no jam and the stall timer
+        # below never started -- 105 of a 120-minute run spent like that.
+        flow = min(1.0, s.realised_speed_ms / self.v.max_speed_ms)
 
         nearby, loom, horn = self._perceive(dt)
         s.nearby = nearby
 
         pothole = is_pothole(s.edge, self.pothole_density) and s.speed > 1.0
 
-        if s.throttle_cmd > 0.3 and s.speed < 0.5:
+        if s.throttle_cmd > 0.3 and s.realised_speed_ms < 0.5:
             s.stalled_s += dt
         else:
             s.stalled_s = 0.0
@@ -1193,7 +1204,9 @@ class World:
             111_320.0 * max(0.2, math.cos(math.radians(s.lat))))
 
         lat, lon = self._pull_to_road(lat, lon, dt)
-        s.travelled_m += haversine_m(s.lat, s.lon, lat, lon)
+        moved = haversine_m(s.lat, s.lon, lat, lon)
+        s.travelled_m += moved
+        s.realised_speed_ms = moved / max(dt, 1e-6)
         s.lat, s.lon = lat, lon
 
         try:
@@ -1380,6 +1393,7 @@ class World:
         s.lat, s.lon = self.origin
         s.heading = bearing_deg(*self.origin, *self.goal)
         s.speed = 0.0
+        s.realised_speed_ms = 0.0
         s.throttle_cmd = 0.0
         s.travelled_m = 0.0
         s.stalled_s = 0.0

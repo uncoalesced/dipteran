@@ -1408,6 +1408,59 @@ def test_pursuit_target_stays_ahead_through_a_junction():
     assert world._route_point_ahead(45.0) == (131.0, 0.0)
 
 
+def test_a_pinned_fly_senses_that_it_is_not_moving():
+    """Optic flow and the stall timer read realised motion, not intent.
+
+    Silk Board trace, 2026-09-23: a panic swerve left the fly on the
+    reverse carriageway facing the roadside, and it sat at one spot for
+    5,600+ frames -- `s.speed` ~4 m/s, while `_pull_to_road` cancelled
+    nearly every step (0.4-0.5 m/s realised, 2 m off-road). Optic flow and
+    the stall timer both read `s.speed`, what the fly *asked* for, so T5's
+    "still air on a fly that is trying to move" never rose and the 45 s
+    stall punishment never came. The full run spent 105 of its 120 minutes
+    like that.
+    """
+    from types import SimpleNamespace
+
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.917343, lon=77.628487)
+    world.goal = (13.0039, 77.6653)
+    world.v = SimpleNamespace(max_speed_ms=8.33)
+    world.cfg = SimpleNamespace(snn=SimpleNamespace(steer_half_angle_deg=70.0))
+    world.pothole_density = 0.0
+    # No routing in this test: an unresolved goal edge makes `_update_route`
+    # a no-op, and an empty route makes the target the goal itself.
+    world._goal_edge = ""
+    world._route_edge = None
+    world._route_edges = []
+    world._route_length_m = None
+    world._route_anchor_edge = None
+    world._route_retry = 0
+    world._last_route_m = None
+    world.route_seeded = True
+    world._calibrating = 0
+    world._perceive = lambda dt: ([], 0.0, 0.0)
+
+    s = world.state
+    s.edge = "38098070#1"
+    s.speed, s.throttle_cmd = 4.0, 0.5      # asking for 4 m/s...
+    s.realised_speed_ms = 0.45              # ...the road pull allows 0.45
+
+    for _ in range(460):                    # 46 s at 0.1 s per frame
+        sensed = world.sense(0.1)
+
+    assert sensed["optic_flow_t4"] < 0.1, (
+        f"optic flow {sensed['optic_flow_t4']:.2f} on a fly realising 0.45 "
+        f"m/s -- it is reading the speed asked for, not achieved")
+    assert sensed["optic_flow_t5"] > 0.4, (
+        "no jam signal: throttle open, nothing moving, and T5 stayed quiet")
+    assert s.stalled_s > 45.0, (
+        f"stall timer {s.stalled_s:.1f} s after 46 s pinned -- the 45 s "
+        f"stall punishment can never fire on a pinned fly")
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]
