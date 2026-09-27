@@ -28,6 +28,7 @@ Engineered by uncoalesced.
 
 from __future__ import annotations
 
+import collections
 import math
 import os
 import subprocess
@@ -654,7 +655,9 @@ class World:
 
         pothole = is_pothole(s.edge, self.pothole_density) and s.speed > 1.0
 
-        if s.throttle_cmd > 0.3 and s.realised_speed_ms < 0.5:
+        net = self._net_speed_ms()
+        if s.throttle_cmd > 0.3 and (s.realised_speed_ms < 0.5
+                                     or (net is not None and net < 0.5)):
             s.stalled_s += dt
         else:
             s.stalled_s = 0.0
@@ -1175,6 +1178,9 @@ class World:
         s.throttle_cmd = throttle
         s.heading = (s.heading + steer * self.v.max_turn_deg_s * dt) % 360.0
 
+        panic_onset = motor.panic > 0.0 and not getattr(
+            self, "_panic_prev", False)
+        self._panic_prev = motor.panic > 0.0
         if motor.panic > 0.0:
             # Giant fiber: a startle burst -- hard acceleration plus a wide
             # swerve. This used to brake toward 0 m/s in the same frame it
@@ -1189,7 +1195,14 @@ class World:
             # way a startled two-wheeler does.
             s.speed = min(self.v.max_speed_ms,
                          s.speed + self.v.max_accel_ms2 * 3.0 * dt)
-            s.heading = (s.heading + math.copysign(45.0, steer or 1.0)) % 360.0
+            # The swerve is one jink per burst, on its first frame. It used
+            # to be 45 degrees on *every* frame DNp01 fired, so a four-frame
+            # burst was a 180-degree flip: that is how the Silk Board trace
+            # (2026-09-23) put the fly onto the reverse carriageway, where it
+            # then pinned for the rest of the run.
+            if panic_onset:
+                s.heading = (s.heading
+                             + math.copysign(45.0, steer or 1.0)) % 360.0
         else:
             target = throttle * self.v.max_speed_ms
             delta = target - s.speed
@@ -1208,6 +1221,8 @@ class World:
         s.travelled_m += moved
         s.realised_speed_ms = moved / max(dt, 1e-6)
         s.lat, s.lon = lat, lon
+        self._track_position(lat, lon, dt)
+        self._kerb_steer(dt)
 
         try:
             x, y = traci.simulation.convertGeo(lon, lat, fromGeo=True)
@@ -1221,6 +1236,83 @@ class World:
             traci.vehicle.setSpeed(EGO_ID, s.speed)
         except Exception:
             pass
+
+    def _track_position(self, lat: float, lon: float, dt: float) -> None:
+        """Keep the last `stall_window_s` of positions for `_net_speed_ms`."""
+        window = getattr(self, "_positions", None)
+        if window is None:
+            window = self._positions = collections.deque()
+        window.append((lat, lon))
+        keep = max(2, int(round(self.v.stall_window_s / max(dt, 1e-6))) + 1)
+        while len(window) > keep:
+            window.popleft()
+        self._positions_dt = dt
+
+    def _net_speed_ms(self) -> float | None:
+        """Net displacement over the stall window, per second.
+
+        None until the window is full. A pinned fly jitters: on the 93358a2
+        Silk Board trace realised speed swung 0.1-1.9 m/s frame to frame
+        while the fly sat within 10 m of one spot for 7,000 frames, so the
+        instantaneous reading kept resetting the stall timer. Net progress
+        over a few seconds does not jitter.
+        """
+        window = getattr(self, "_positions", None)
+        if not window:
+            return None
+        dt = getattr(self, "_positions_dt", 0.0)
+        span = (len(window) - 1) * dt
+        if span < self.v.stall_window_s - 1e-6:
+            return None
+        (lat0, lon0), (lat1, lon1) = window[0], window[-1]
+        return haversine_m(lat0, lon0, lat1, lon1) / span
+
+    def _lane_bearing(self, edge: str, pos: float) -> float | None:
+        """Compass bearing of `edge`'s lane at `pos` metres along it."""
+        if not edge:
+            return None
+        shape = self._lane_shape(edge)
+        if shape is None or len(shape) < 2:
+            return None
+        remaining = max(0.0, pos)
+        segments = list(zip(shape, shape[1:]))
+        for index, ((x0, y0), (x1, y1)) in enumerate(segments):
+            seg = math.hypot(x1 - x0, y1 - y0)
+            if seg <= 0.0:
+                continue
+            if remaining <= seg or index == len(segments) - 1:
+                return math.degrees(math.atan2(x1 - x0, y1 - y0)) % 360.0
+            remaining -= seg
+        return None
+
+    def _kerb_steer(self, dt: float) -> None:
+        """A fly held back by the road slides its heading along the lane.
+
+        `_pull_to_road` fixes the position but used to leave the heading
+        alone, so a fly facing off the road stayed facing off it and every
+        step was cancelled again. Traced on Silk Board (93358a2, 2026-09-23):
+        at the end of `38098070#1` the fly faced 108 degrees, the lane and
+        its route target lay 46 degrees to its right, the SNN's steer sat in
+        the right-side decode dead zone (+/-0.01), and it realised 0.1-1.9
+        m/s of a commanded 4 m/s for 7,000 frames -- the whole pin.
+
+        A car pressed against a kerb is turned by it; this is that contact
+        force. It only acts while the road is cancelling at least half the
+        commanded motion, so a fly driving freely steers on the connectome
+        alone, exactly as before.
+        """
+        s = self.state
+        rate = self.v.kerb_turn_deg_s
+        if rate <= 0.0 or s.speed < 1.0:
+            return
+        if s.realised_speed_ms >= 0.5 * s.speed:
+            return
+        tangent = self._lane_bearing(s.edge, s.edge_pos)
+        if tangent is None:
+            return
+        diff = wrap180(tangent - s.heading)
+        turn = math.copysign(min(abs(diff), rate * dt), diff)
+        s.heading = (s.heading + turn) % 360.0
 
     def _pull_to_road(self, lat: float, lon: float,
                       dt: float) -> tuple[float, float]:
@@ -1397,6 +1489,8 @@ class World:
         s.throttle_cmd = 0.0
         s.travelled_m = 0.0
         s.stalled_s = 0.0
+        self._positions = collections.deque()
+        self._panic_prev = False
         s.off_road_m = 0.0
         s.nearby = []
         s.distance_to_goal_m = haversine_m(*self.origin, *self.goal)
