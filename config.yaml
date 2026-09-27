@@ -287,3 +287,8 @@ vehicle:
   # 49-edge route through a one-way grid jumped every few seconds and took
   # the bearing with it. Short values are twitchy, long ones cut corners.
   route_lookahead_m: 45.0
+  # A fly pressed against the road edge is turned along the lane at this
+  # rate (World._kerb_steer). Frees the Silk Board pin, 2026-09-27.
+  kerb_turn_deg_s: 60.0
+  # Seconds of net displacement the stall timer judges progress over.
+  stall_window_s: 5.0

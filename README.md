@@ -159,7 +159,7 @@ connected watches the same fly, and changing the route means a restart.
 ### Other things you can run
 
 ```bash
-python tests/test_units.py                     # 74 unit tests, no FlyWire download needed
+python tests/test_units.py                     # 87 unit tests, no FlyWire download needed
 python scripts/run_route.py --max-minutes 60   # full route, with drift and geography reporting
 python scripts/probe_diagnostics.py            # reproduces every steering figure below
 python -m dipteran.navigator                   # the LIF gain calibration sweep

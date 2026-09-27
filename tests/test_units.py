@@ -1461,6 +1461,87 @@ def test_a_pinned_fly_senses_that_it_is_not_moving():
         f"stall punishment can never fire on a pinned fly")
 
 
+def test_the_kerb_turns_a_blocked_fly_along_the_lane():
+    """Silk Board pin (93358a2 trace): facing 108 degrees at the end of a
+    lane running ~190, target to the right inside the decode dead zone, the
+    road pull cancelling ~90% of each step. The heading never changed, so
+    neither did anything else for 7,000 frames."""
+    from types import SimpleNamespace
+
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.9173, lon=77.6285)
+    world.v = SimpleNamespace(kerb_turn_deg_s=60.0)
+    # A lane running due south in SUMO x/y (y decreasing).
+    world._lane_shapes = {"L": [(0.0, 100.0), (0.0, 0.0)]}
+    s = world.state
+    s.edge, s.edge_pos, s.heading = "L", 95.0, 108.0
+
+    s.speed, s.realised_speed_ms = 4.0, 0.4          # pinned
+    for _ in range(20):                               # 2 s
+        world._kerb_steer(0.1)
+    assert abs(s.heading - 180.0) < 1e-6, (
+        f"heading {s.heading:.1f} after 2 s pressed against a lane running "
+        f"180 -- the kerb did not turn it")
+
+    # Driving freely, the kerb leaves the connectome's heading alone.
+    s.heading, s.realised_speed_ms = 108.0, 3.9
+    world._kerb_steer(0.1)
+    assert s.heading == 108.0
+
+
+def test_a_panic_burst_swerves_once_not_every_frame():
+    """A four-frame DNp01 burst used to add 45 degrees per frame -- a
+    180-degree flip onto the reverse carriageway at Silk Board."""
+    from types import SimpleNamespace
+
+    from dipteran.navigator import MotorOutput
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.9173, lon=77.6285, heading=0.0)
+    world.v = SimpleNamespace(
+        steer_smoothing_s=0.0, steer_bias_tau_s=0.0, steer_scale=1.0,
+        throttle_scale=1.0, max_turn_deg_s=0.0, max_speed_ms=8.0,
+        max_accel_ms2=2.5, brake_ms2=8.0, kerb_turn_deg_s=0.0,
+        stall_window_s=5.0)
+    world._calibrating = 0
+    world._steer_rest = 0.0
+    world.traci = SimpleNamespace()               # every call inside raises
+    world._pull_to_road = lambda lat, lon, dt: (lat, lon)
+
+    for _ in range(4):
+        world.apply(MotorOutput(panic=0.5, steer=0.1), 0.1)
+    assert world.state.heading == 45.0, world.state.heading
+
+    world.apply(MotorOutput(panic=0.0, steer=0.1), 0.1)
+    world.apply(MotorOutput(panic=0.5, steer=0.1), 0.1)
+    assert world.state.heading == 90.0, "a fresh burst should jink again"
+
+
+def test_the_stall_timer_sees_a_jittering_pin():
+    """Pinned at Silk Board, realised speed swung 0.1-1.9 m/s frame to frame
+    with no net progress, so the instantaneous stall test kept resetting."""
+    from types import SimpleNamespace
+
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=12.917343, lon=77.628487)
+    world.v = SimpleNamespace(stall_window_s=5.0)
+    lat0 = world.state.lat
+    for i in range(51):                     # 5 s oscillating +/- 1 m
+        world._track_position(lat0 + (1 if i % 2 else -1) / 111_320.0,
+                              77.628487, 0.1)
+    net = world._net_speed_ms()
+    assert net is not None and net < 0.5, net
+
+    for i in range(51):                     # 5 s at 4 m/s due north
+        world._track_position(lat0 + 0.4 * i / 111_320.0, 77.628487, 0.1)
+    assert abs(world._net_speed_ms() - 4.0) < 0.05
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]

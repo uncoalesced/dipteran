@@ -193,6 +193,11 @@ class Vehicle(BaseModel):
     # and the bearing is noisy and twitchy; too long and the fly cuts
     # corners across whatever sits between it and the target.
     route_lookahead_m: float = Field(default=45.0, gt=0.0)
+    # Degrees per second the lane turns a fly whose motion the road pull is
+    # cancelling -- see `World._kerb_steer`. 0 disables it.
+    kerb_turn_deg_s: float = Field(default=60.0, ge=0.0)
+    # Window for the net-progress stall measure -- see `World._net_speed_ms`.
+    stall_window_s: float = Field(default=5.0, gt=0.0)
 
 
 class Snn(BaseModel):
