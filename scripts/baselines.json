@@ -10,25 +10,25 @@
       "episodes": 15,
       "episode_minutes": 2.0,
       "max_minutes": 45.0,
-      "source": "runs/oneturn_500m_2026-09-23.json",
-      "recorded": "2026-09-23",
+      "source": "runs/oneturn_500m_2026-09-24.json",
+      "recorded": "2026-09-24",
       "caveats": [
-        "re-seeded on de4d8e2; the previous baseline, runs/oneturn_500m_2026-09-19.json, predates closed_route_m and no_route_frames",
-        "settled route start 535.6 m in all 15 episodes; the spawn's lookup edge reads 658 m",
-        "heading error median 24.8 deg here against 10.7 deg on a37cda7 (runs/oneturn_500m_2026-09-22pm.json), unexplained -- see SESSION_2026-09-23.md",
+        "re-seeded on 93358a2 (final Handoff_23 code); previous baseline runs/oneturn_500m_2026-09-23.json on de4d8e2",
+        "arrivals 13/15 -> 15/15, best on record; heading error median 24.8 -> 19.3 deg",
+        "steer sign agreement fell 0.664 -> 0.489, unexplained; guess (unmeasured): junction fix removed ~180 deg frames, leaving the decode dead zone dominant -- see Handoff_24.md",
         "the project's only evidence that the carried plastic weights do anything: frames-to-arrival fell 857 -> ~730 on 2026-09-19"
       ],
       "expect": {
-        "episodes_arrived": 13,
+        "episodes_arrived": 15,
         "episode_count": 15,
-        "frames_to_arrival_mean": 843.077,
-        "closed_route_m_mean": 248.147,
-        "heading_error_abs_median": 24.8,
-        "steer_sign_agreement": 0.664,
-        "no_route_frames_mean": 165.533,
-        "internal_edge_frames_mean": 162.267,
-        "travelled_m": 361.2,
-        "plastic_drift_relative": 0.000422
+        "frames_to_arrival_mean": 735.2,
+        "closed_route_m_mean": 260.487,
+        "heading_error_abs_median": 19.3,
+        "steer_sign_agreement": 0.489,
+        "no_route_frames_mean": 92.467,
+        "internal_edge_frames_mean": 89.333,
+        "travelled_m": 262.4,
+        "plastic_drift_relative": 0.000168
       }
     },
     "twisty_2400m": {
@@ -38,24 +38,24 @@
       "episodes": 3,
       "episode_minutes": 6.0,
       "max_minutes": 25.0,
-      "source": "runs/twisty_2400m_2026-09-23.json",
-      "recorded": "2026-09-23",
+      "source": "runs/twisty_2400m_2026-09-24.json",
+      "recorded": "2026-09-24",
       "caveats": [
-        "never arrived: best honest closure on record is 566 m of 2,398 m (episode 2 of this run)",
+        "re-seeded on 93358a2; first twisty arrival in the project's history (episode 2, 3,414 frames, 983 m of route closed)",
         "four edges on this route are sinks with no outgoing connections (310456191, 310456195, 310456204, 794624007) -- confirmed offline, present in the right-hand network too",
-        "heading error median 34.9 deg here and 35.1 deg on 1b52eb7, against 18.1 and 27.3 deg before episodes 2+ were route-seeded, unexplained -- see SESSION_2026-09-23.md"
+        "heading error median 34.9 -> 27.1 deg across the 93358a2 fixes"
       ],
       "expect": {
-        "episodes_arrived": 0,
+        "episodes_arrived": 1,
         "episode_count": 3,
-        "frames_to_arrival_mean": null,
-        "closed_route_m_mean": 413.233,
-        "heading_error_abs_median": 34.9,
-        "steer_sign_agreement": 0.623,
-        "no_route_frames_mean": 997,
-        "internal_edge_frames_mean": 903.333,
-        "travelled_m": 839.3,
-        "plastic_drift_relative": 0.000821
+        "frames_to_arrival_mean": 3414,
+        "closed_route_m_mean": 645.533,
+        "heading_error_abs_median": 27.1,
+        "steer_sign_agreement": 0.602,
+        "no_route_frames_mean": 1346.667,
+        "internal_edge_frames_mean": 1181.333,
+        "travelled_m": 1141.9,
+        "plastic_drift_relative": 0.000561
       }
     }
   }

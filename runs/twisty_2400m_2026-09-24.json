@@ -1,0 +1,108 @@
+{
+  "arrived": true,
+  "episodes": [
+    {
+      "episode": 1,
+      "arrived": false,
+      "frames": 3600,
+      "closed_m": 60.4,
+      "closed_route_m": 538.7,
+      "best_route_m": 1858.9,
+      "best_distance_m": 441.8,
+      "travelled_m": 1204.8,
+      "no_route_frames": 1289,
+      "internal_edge_frames": 1158,
+      "plastic_drift": 0.000378
+    },
+    {
+      "episode": 2,
+      "arrived": true,
+      "frames": 3414,
+      "closed_m": 302.5,
+      "closed_route_m": 983.3,
+      "best_route_m": 1414.3,
+      "best_distance_m": 199.7,
+      "travelled_m": 1172.0,
+      "no_route_frames": 1449,
+      "internal_edge_frames": 1305,
+      "plastic_drift": 0.000283
+    },
+    {
+      "episode": 3,
+      "arrived": false,
+      "frames": 3600,
+      "closed_m": 60.1,
+      "closed_route_m": 414.6,
+      "best_route_m": 1983.0,
+      "best_distance_m": 442.1,
+      "travelled_m": 1141.9,
+      "no_route_frames": 1302,
+      "internal_edge_frames": 1081,
+      "plastic_drift": 0.000561
+    }
+  ],
+  "episode_count": 3,
+  "episodes_arrived": 1,
+  "closed_m_first_third": 60.4,
+  "closed_m_last_third": 60.1,
+  "origin": [
+    12.92143,
+    77.63576
+  ],
+  "goal": [
+    12.92581,
+    77.63463
+  ],
+  "frames": 10614,
+  "sim_seconds": 1061.4,
+  "wall_seconds": 1080.8,
+  "startup_seconds": 168.2,
+  "loop_seconds": 912.6,
+  "realtime_factor": 1.16,
+  "realtime_paced": false,
+  "distance_start_m": 502.2,
+  "distance_end_m": 568.5,
+  "distance_min_m": 442.1,
+  "closed_m": 60.1,
+  "travelled_m": 1141.9,
+  "edges_visited": 138,
+  "final_edge": "310456191",
+  "off_network_frames": 0,
+  "off_road_m_median": 0.92,
+  "off_road_m_max": 2.31,
+  "speed_ms_median": 4.045,
+  "speed_ms_max": 8.15,
+  "steer_abs_median": 0.011,
+  "steer_abs_max": 0.329,
+  "heading_error_abs_median": 27.1,
+  "heading_error_abs_p90": 91.9,
+  "steer_sign_agreement": 0.602,
+  "steer_sign_votes": 8957,
+  "panic_frames": 17,
+  "pothole_frames": 350,
+  "stall_peak_s": 0.1,
+  "events": {
+    "pothole": 350,
+    "loom": 6
+  },
+  "states": {
+    "IDLE DRIFT": 10117,
+    "POTHOLE IMPACT": 350,
+    "ODOR TRACKING": 122,
+    "PANIC SWERVE": 17,
+    "HORN OVERDRIVE": 8
+  },
+  "plastic_drift_relative": 0.000561,
+  "plastic_finite": true,
+  "plastic_synapses": 115849,
+  "frames_per_s": 11.63,
+  "phase_ms_per_frame": {
+    "sense_ms": 0.96,
+    "snn_ms": 69.16,
+    "apply_ms": 13.96,
+    "step_ms": 1.8
+  },
+  "background_vehicles": 259,
+  "min_syn_count": 0,
+  "gain": 16.0
+}
