@@ -1549,6 +1549,85 @@ def test_right_turns_get_the_measured_extra_gain():
     assert abs(turned(-0.01) + 0.01 * 10.0 * 45.0 * 0.1) < 1e-9
 
 
+def test_the_live_steering_fit_finds_the_true_offset_from_a_crab():
+    """Tin Factory trace, 2026-09-28: the parked offset was -0.013, the true
+    zero-error readout +0.001, and the fly settled at a standing -35 deg
+    error where the old +/-10 deg window never opened. The fit has to
+    recover the true offset from one-sided data, then even out the sides
+    once both are seen."""
+    import math
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    def readout(err):
+        return 0.001 + 0.0003 * min(err, 0.0) + 0.0006 * max(err, 0.0)
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(steer_bias_tau_s=30.0, steer_fit_window_deg=60.0)
+    fit = None
+    for i in range(600):                     # 60 s crabbing at -20..-50
+        err = -35.0 + 15.0 * math.sin(i / 20.0)
+        fit = world._steer_fit(readout(err), err, 4.0, 0.1) or fit
+    assert fit is not None and abs(fit[0] - 0.001) < 1e-4, fit
+    assert fit[1:] == (1.0, 1.0), "one side only: no gain correction"
+
+    for i in range(3000):                    # 300 s across both sides
+        err = 40.0 * math.sin(i / 20.0)
+        fit = world._steer_fit(readout(err), err, 4.0, 0.1) or fit
+    rest, gain_left, gain_right = fit
+    assert abs(rest - 0.001) < 1e-4, rest
+    # Slopes 0.0003 left, 0.0006 right: mean 0.00045.
+    assert abs(gain_left - 1.5) < 0.02 and abs(gain_right - 0.75) < 0.02, fit
+
+    # Parked, or a target far behind: no update.
+    assert world._steer_fit(0.5, 0.0, 0.0, 0.1) is None
+    assert world._steer_fit(0.5, 120.0, 4.0, 0.1) is None
+
+
+def test_the_fly_is_not_teleported_onto_an_unconnected_road():
+    """Tin Factory trace, 2026-09-28: 1-2 m off its lane, the fly was
+    snapped onto an overlapping road it has no connection to (a parallel
+    road, and the reverse carriageway), adding ~400-1,200 m of route.
+    Legal successors must still be accepted."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    # A runs east along y=0 into junction J, then B continues east; R is an
+    # unconnected road 2 m north, running the other way.
+    world._lane_shapes = {"A": [(0.0, 0.0), (100.0, 0.0)],
+                          "B": [(105.0, 0.0), (200.0, 0.0)],
+                          ":J_0": [(100.0, 0.0), (105.0, 0.0)],
+                          "R": [(200.0, 2.0), (0.0, 2.0)]}
+    world.traci = SimpleNamespace(
+        edge=SimpleNamespace(getLaneNumber=lambda e: 1),
+        lane=SimpleNamespace(getLinks=lambda lane: (
+            [("B_0", True, True, False, ":J_0_0", "G", "s", 5.0)]
+            if lane == "A_0" else [])),
+        simulation=SimpleNamespace(
+            convertGeo=lambda lon, lat, fromGeo=False: (lon, lat)))
+    world._last_normal_edge = "A"
+
+    # 1.5 m north of A at x=60: nearest is R, which A cannot reach.
+    edge, pos, (x, y) = world._connected_snap(1.5, 60.0, "R")
+    assert edge == "A" and abs(pos - 60.0) < 1e-9 and (x, y) == (60.0, 0.0)
+
+    # Past A's end, before B starts, the legal road is the junction lane.
+    # Without it the fly was pulled back to A's end every frame, pinned.
+    edge, pos, (x, y) = world._connected_snap(1.5, 102.5, "R")
+    assert edge == ":J_0" and abs(pos - 2.5) < 1e-9, (edge, pos)
+
+    # Legal moves are left alone: A's successor, and junction J's lanes.
+    assert world._connected_snap(0.5, 150.0, "B") is None
+    assert world._connected_snap(0.5, 102.0, ":J_0") is None
+
+    # Far from every legal lane, the fly really is elsewhere.
+    assert world._connected_snap(50.0, 60.0, "R") is None
+
+
 def test_the_stall_timer_sees_a_jittering_pin():
     """Pinned at Silk Board, realised speed swung 0.1-1.9 m/s frame to frame
     with no net progress, so the instantaneous stall test kept resetting."""
