@@ -1505,6 +1505,7 @@ def test_a_panic_burst_swerves_once_not_every_frame():
         steer_smoothing_s=0.0, steer_bias_tau_s=0.0, steer_scale=1.0,
         throttle_scale=1.0, max_turn_deg_s=0.0, max_speed_ms=8.0,
         max_accel_ms2=2.5, brake_ms2=8.0, kerb_turn_deg_s=0.0,
+        steer_right_gain=1.0,
         stall_window_s=5.0)
     world._calibrating = 0
     world._steer_rest = 0.0
@@ -1518,6 +1519,34 @@ def test_a_panic_burst_swerves_once_not_every_frame():
     world.apply(MotorOutput(panic=0.0, steer=0.1), 0.1)
     world.apply(MotorOutput(panic=0.5, steer=0.1), 0.1)
     assert world.state.heading == 90.0, "a fresh burst should jink again"
+
+
+def test_right_turns_get_the_measured_extra_gain():
+    """Test F: the connectome swings DNa02 R-L +14.2 Hz for a right turn
+    and -26.1 Hz for a left, so the same readout magnitude has to turn the
+    fly harder to the right. Left turns are left untouched."""
+    from types import SimpleNamespace
+
+    from dipteran.navigator import MotorOutput
+    from dipteran.world import VehicleState, World
+
+    def turned(steer):
+        world = World.__new__(World)
+        world.state = VehicleState(lat=12.9173, lon=77.6285, heading=180.0)
+        world.v = SimpleNamespace(
+            steer_smoothing_s=0.0, steer_bias_tau_s=0.0, steer_scale=10.0,
+            throttle_scale=1.0, max_turn_deg_s=45.0, max_speed_ms=8.0,
+            max_accel_ms2=2.5, brake_ms2=8.0, kerb_turn_deg_s=0.0,
+            stall_window_s=5.0, steer_right_gain=1.84)
+        world._calibrating = 0
+        world._steer_rest = 0.0
+        world.traci = SimpleNamespace()
+        world._pull_to_road = lambda lat, lon, dt: (lat, lon)
+        world.apply(MotorOutput(steer=steer), 0.1)
+        return world.state.heading - 180.0
+
+    assert abs(turned(0.01) - 0.01 * 10.0 * 1.84 * 45.0 * 0.1) < 1e-9
+    assert abs(turned(-0.01) + 0.01 * 10.0 * 45.0 * 0.1) < 1e-9
 
 
 def test_the_stall_timer_sees_a_jittering_pin():

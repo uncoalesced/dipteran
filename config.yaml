@@ -292,3 +292,6 @@ vehicle:
   kerb_turn_deg_s: 60.0
   # Seconds of net displacement the stall timer judges progress over.
   stall_window_s: 5.0
+  # Right-turn gain: probe_diagnostics Test F, DNa02 R-L swings +14.2 Hz
+  # right against -26.1 Hz left from the balanced point, 26.1 / 14.2 = 1.84.
+  steer_right_gain: 1.84

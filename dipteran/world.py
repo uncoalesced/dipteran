@@ -1172,6 +1172,17 @@ class World:
                                      * min(1.0, dt / bias_tau))
             raw_steer -= self._steer_rest
         s.steer_filtered = raw_steer
+        # Right turns get their own gain because the connectome gives them
+        # less authority. DNa02-left rests silent, so a right turn can only
+        # be expressed by raising DNa02-right above its balanced 104.5 Hz,
+        # and PFL3 at full scale only lifts it to 118.7 Hz (+14.2), while a
+        # left turn pulls it down to 78.4 Hz (-26.1). Test F in
+        # scripts/probe_diagnostics.py measures both. At equal gain a target
+        # 30-60 degrees right barely turned the fly: that was the wrong
+        # branch behind item 4's goal swarming and behind the ~25 sim-min
+        # circle on the 2026-09-27b Silk Board run.
+        if raw_steer > 0.0:
+            raw_steer *= self.v.steer_right_gain
         steer = max(-1.0, min(1.0, raw_steer * self.v.steer_scale))
         throttle = max(0.0, min(1.0, motor.throttle * self.v.throttle_scale))
 
