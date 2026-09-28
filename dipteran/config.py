@@ -207,6 +207,9 @@ class Vehicle(BaseModel):
     # How far a fly may be from a lane it is connected to before a snap onto
     # an unconnected road is allowed -- see `World._connected_snap`.
     lane_keep_m: float = Field(default=8.0, gt=0.0)
+    # Seconds of no net progress, motor open, before lane-keeping lets go
+    # for 5 s -- see `World._connected_snap`.
+    lane_keep_release_s: float = Field(default=10.0, gt=0.0)
 
 
 class Snn(BaseModel):

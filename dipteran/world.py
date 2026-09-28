@@ -1265,6 +1265,18 @@ class World:
         s.realised_speed_ms = moved / max(dt, 1e-6)
         s.lat, s.lon = lat, lon
         self._track_position(lat, lon, dt)
+        # Lane-keeping release timer -- see `_connected_snap`.
+        net = self._net_speed_ms()
+        if s.speed > 1.0 and net is not None and net < 0.5:
+            self._stuck_s = getattr(self, "_stuck_s", 0.0) + dt
+        elif getattr(self, "_release_s", 0.0) <= 0.0:
+            self._stuck_s = 0.0
+        if getattr(self, "_release_s", 0.0) > 0.0:
+            self._release_s -= dt
+        elif (getattr(self, "_stuck_s", 0.0) > 0.0
+              and self._stuck_s > self.v.lane_keep_release_s):
+            self._release_s = 5.0
+            self._stuck_s = 0.0
         self._kerb_steer(dt)
 
         try:
@@ -1466,6 +1478,12 @@ class World:
         """
         last = getattr(self, "_last_normal_edge", "")
         if not last or nearest == last:
+            return None
+        if getattr(self, "_release_s", 0.0) > 0.0:
+            # Stuck for `lane_keep_release_s` with the motor open: whatever
+            # the constraint is protecting, it is now what holds the fly.
+            # Plain nearest-lane snapping for a few seconds, as before this
+            # existed, and the fly's lane restarts from wherever that puts it.
             return None
         succ, junctions, vias = self._reachable(last)
         if not succ and not junctions:
@@ -1677,6 +1695,7 @@ class World:
         self._panic_prev = False
         self._fit_stats = None
         self._last_normal_edge = ""
+        self._stuck_s = self._release_s = 0.0
         s.off_road_m = 0.0
         s.nearby = []
         s.distance_to_goal_m = haversine_m(*self.origin, *self.goal)

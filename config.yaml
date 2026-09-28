@@ -302,3 +302,5 @@ vehicle:
   # rather than snapped onto an overlapping, unconnected road (flyovers,
   # the opposite carriageway). World._connected_snap.
   lane_keep_m: 8.0
+  # Stuck this long with the motor open and lane-keeping releases for 5 s.
+  lane_keep_release_s: 10.0

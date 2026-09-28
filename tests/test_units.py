@@ -1627,6 +1627,10 @@ def test_the_fly_is_not_teleported_onto_an_unconnected_road():
     # Far from every legal lane, the fly really is elsewhere.
     assert world._connected_snap(50.0, 60.0, "R") is None
 
+    # Stuck long enough, lane-keeping lets go rather than hold the fly.
+    world._release_s = 3.0
+    assert world._connected_snap(1.5, 60.0, "R") is None
+
 
 def test_the_stall_timer_sees_a_jittering_pin():
     """Pinned at Silk Board, realised speed swung 0.1-1.9 m/s frame to frame
