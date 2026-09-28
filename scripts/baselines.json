@@ -10,25 +10,24 @@
       "episodes": 15,
       "episode_minutes": 2.0,
       "max_minutes": 45.0,
-      "source": "runs/oneturn_500m_2026-09-24.json",
-      "recorded": "2026-09-24",
+      "source": "runs/oneturn_500m_2026-09-28.json",
+      "recorded": "2026-09-28",
       "caveats": [
-        "re-seeded on 93358a2 (final Handoff_23 code); previous baseline runs/oneturn_500m_2026-09-23.json on de4d8e2",
-        "arrivals 13/15 -> 15/15, best on record; heading error median 24.8 -> 19.3 deg",
-        "steer sign agreement fell 0.664 -> 0.489, unexplained; guess (unmeasured): junction fix removed ~180 deg frames, leaving the decode dead zone dominant -- see Handoff_24.md",
+        "re-seeded on e360c89 (kerb steering d7705b0 + right-turn gain 1.84); previous baseline runs/oneturn_500m_2026-09-24.json on 93358a2",
+        "arrivals 15/15 held; frames to arrival 735 -> 727; steer sign agreement 0.489 -> 0.539; heading error median 19.3 -> 20.0 deg",
         "the project's only evidence that the carried plastic weights do anything: frames-to-arrival fell 857 -> ~730 on 2026-09-19"
       ],
       "expect": {
         "episodes_arrived": 15,
         "episode_count": 15,
-        "frames_to_arrival_mean": 735.2,
-        "closed_route_m_mean": 260.487,
-        "heading_error_abs_median": 19.3,
-        "steer_sign_agreement": 0.489,
-        "no_route_frames_mean": 92.467,
-        "internal_edge_frames_mean": 89.333,
-        "travelled_m": 262.4,
-        "plastic_drift_relative": 0.000168
+        "frames_to_arrival_mean": 726.867,
+        "closed_route_m_mean": 260.607,
+        "heading_error_abs_median": 20.0,
+        "steer_sign_agreement": 0.539,
+        "no_route_frames_mean": 99,
+        "internal_edge_frames_mean": 95.667,
+        "travelled_m": 268.5,
+        "plastic_drift_relative": 0.000186
       }
     },
     "twisty_2400m": {
@@ -43,7 +42,8 @@
       "caveats": [
         "re-seeded on 93358a2; first twisty arrival in the project's history (episode 2, 3,414 frames, 983 m of route closed)",
         "four edges on this route are sinks with no outgoing connections (310456191, 310456195, 310456204, 794624007) -- confirmed offline, present in the right-hand network too",
-        "heading error median 34.9 -> 27.1 deg across the 93358a2 fixes"
+        "heading error median 34.9 -> 27.1 deg across the 93358a2 fixes",
+        "NOT re-seeded on e360c89: runs/twisty_2400m_2026-09-28.json went 0/3, closed_route_m_mean 645.5 -> 154.7, heading error median 27.1 -> 30.7 deg. Kept on the 09-24 run so this keeps flagging until explained; 09-24 is the only twisty arrival on record, other twisty runs closed 4.5-124 m direct"
       ],
       "expect": {
         "episodes_arrived": 1,
