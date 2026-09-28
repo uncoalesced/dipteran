@@ -26,11 +26,13 @@ name. The commit that added each run describes it.
 | oneturn_500m_2026-09-22pm | SUCCESS | 14/15 | 199.9 | 226.1 | 266.5 |
 | oneturn_500m_2026-09-23 | SUCCESS | 13/15 | 271.1 | 154.9 | 361.2 |
 | oneturn_500m_2026-09-24 | SUCCESS | 15/15 | 199.9 | 226.1 | 262.4 |
+| oneturn_500m_2026-09-28 | SUCCESS | 15/15 | 200.0 | 226.0 | 268.5 |
 | twisty_0209 | FAILED | 0/3 | 361.7 | 140.5 | 503.9 |
 | twisty_2400m_1b52eb7 | FAILED | 0/3 | 497.7 | 4.5 | 1,000.4 |
 | twisty_2400m_2026-09-22 | FAILED | 0/3 | 378.3 | 123.9 | 1,062.2 |
 | twisty_2400m_2026-09-23 | FAILED | 0/3 | 494.6 | 7.6 | 839.3 |
 | twisty_2400m_2026-09-24 | SUCCESS (partial) | 1/3 | 442.1 | 60.1 | 1,141.9 |
+| twisty_2400m_2026-09-28 | FAILED (regressed from 1/3) | 0/3 | 442.9 | 59.3 | 1,166.5 |
 | straight_silkboard_2026-09-23 | SUCCESS | 1/1 | 199.8 | 366.3 | 380.8 |
 | silkboard_tinfactory_2026-09-23 | FAILED, pinned at Silk Board | 0/1 | 10,191.8 | 395.7 | 4,646.0 |
 | silkboard_tinfactory_2026-09-27 | FAILED, pinned at Silk Board | 0/1 (wall cap) | 10,194.5 | 393.0 | 4,955.2 |
