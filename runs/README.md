@@ -34,7 +34,8 @@ name. The commit that added each run describes it.
 | straight_silkboard_2026-09-23 | SUCCESS | 1/1 | 199.8 | 366.3 | 380.8 |
 | silkboard_tinfactory_2026-09-23 | FAILED, pinned at Silk Board | 0/1 | 10,191.8 | 395.7 | 4,646.0 |
 | silkboard_tinfactory_2026-09-27 | FAILED, pinned at Silk Board | 0/1 (wall cap) | 10,194.5 | 393.0 | 4,955.2 |
-| [silkboard_tinfactory_2026-09-27b](silkboard_tinfactory_2026-09-27b.md) | **FAILED, 785 m short** | 0/1 | **785.1** | **9,802.5** | 26,314.7 |
+| [silkboard_tinfactory_2026-09-27b](silkboard_tinfactory_2026-09-27b.md) | FAILED, 785 m short | 0/1 | 785.1 | 9,802.5 | 26,314.7 |
+| [silkboard_tinfactory_2026-09-28](silkboard_tinfactory_2026-09-28.md) | **FAILED, 324 m short at best, circling the goal** | 0/1 (150 min) | **324.4** (ended 355.4) | **10,263.1** | 33,983.1 |
 
-"Closest" and "closed" are the run's final figures; in multi-episode runs
-they come from the last episode.
+"Closest" is `distance_min_m` and "closed" is `closed_m`, from the run JSON;
+in multi-episode runs they come from the last episode.
