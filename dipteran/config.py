@@ -198,6 +198,9 @@ class Vehicle(BaseModel):
     kerb_turn_deg_s: float = Field(default=60.0, ge=0.0)
     # Window for the net-progress stall measure -- see `World._net_speed_ms`.
     stall_window_s: float = Field(default=5.0, gt=0.0)
+    # Extra gain on right turns, from the per-side authority Test F
+    # measures -- see `World.apply`. 1.0 is symmetric.
+    steer_right_gain: float = Field(default=1.0, gt=0.0)
 
 
 class Snn(BaseModel):
