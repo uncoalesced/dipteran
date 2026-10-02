@@ -599,6 +599,14 @@
         picker.defaults = { origin: r.origin, destination: r.destination };
         pickerMode.textContent = r.live ? 'live brain' : 'mock stream';
         picker.defaultLabel = `${r.origin.label} to ${r.destination.label}`;
+        // A run already going (another tab, a reload, or a POST from a
+        // script): there is only one sim per server, so attach to it.
+        if (r.started) {
+          picker.released = true;
+          pickerEl.remove();
+          log('attached to the running simulation', 'text-emerald-400');
+          return;
+        }
         pickerRefresh();
       })
       .catch(() => pickerFail('Could not reach the server for the route bounds.'));
