@@ -88,6 +88,9 @@ ROUTE_RETRY_FRAMES = 50
 # `World._pothole_jolt`.
 POTHOLE_JOLT_S = 0.5
 
+# Slowest fraction of commanded speed `World.apply` eases to for a sharp turn.
+TURN_SPEED_FLOOR = 0.4
+
 def balanced_pfl3(half_angle_deg: float) -> float:
     """What both lobes read with the goal dead ahead, for a given lobe width.
 
@@ -1275,7 +1278,16 @@ class World:
                 s.heading = (s.heading
                              + math.copysign(45.0, steer or 1.0)) % 360.0
         else:
-            target = throttle * self.v.max_speed_ms
+            # Ease off for a turn, as a driver does. Right turns get about
+            # half the connectome's left-turn authority (probe, 2026-10-02:
+            # +0.028 vs -0.063 at 75 deg), and at full speed a 55-degree
+            # right at the end of `-362215135`, 329 m from Tin Factory, was
+            # over before the heading caught up; the snap took the straight
+            # branch. cos(error) costs nothing on a straight road (0.99 at
+            # the 9-degree median) and halves the speed into a sharp turn.
+            turn = max(TURN_SPEED_FLOOR,
+                       math.cos(math.radians(min(90.0, abs(s.heading_error_deg)))))
+            target = throttle * self.v.max_speed_ms * turn
             delta = target - s.speed
             rate = self.v.max_accel_ms2 if delta > 0 else self.v.brake_ms2
             s.speed = max(0.0, s.speed + math.copysign(
@@ -1505,7 +1517,16 @@ class World:
         otherwise (edge, pos, (x, y)) on the nearest legal lane.
         """
         last = getattr(self, "_last_normal_edge", "")
-        if not last or nearest == last:
+        if not last:
+            return None
+        # Pressed against the far end of its own edge, the fly can only go
+        # on to a successor -- but where netconvert left a gap (Silk Board
+        # run, 2026-10-03: `380724493#0-AddedOnRampEdge` ends 9 m short of
+        # its only successor) that edge's end stays the nearest lane, and the
+        # pull hauled the fly back to it every frame for 400+ s. Past the end
+        # the successors take over, up to twice `lane_keep_m` away.
+        at_end = nearest == last and self._at_edge_end(last, lat, lon)
+        if nearest == last and not at_end:
             return None
         if getattr(self, "_release_s", 0.0) > 0.0:
             # Stuck for `lane_keep_release_s` with the motor open: whatever
@@ -1525,7 +1546,7 @@ class World:
         route = getattr(self, "_route_edges", ())
         prefer = (next((e for e in succ if e in route), None)
                   if nearest in succ and nearest not in route else None)
-        if prefer is None:
+        if prefer is None and not at_end:
             if nearest.startswith(":"):
                 if _junction_of(nearest) in junctions:
                     return None
@@ -1544,13 +1565,28 @@ class World:
         # The junction lanes matter: past the end of `last` they are the only
         # legal road until the successor starts, and without them the fly was
         # pulled back to the edge end every frame, pinned.
-        for candidate in (last, *succ, *vias):
+        candidates = (*succ, *vias) if at_end else (last, *succ, *vias)
+        for candidate in candidates:
             hit = _project(self._lane_shape(candidate), x, y)
             if hit is not None and (best is None or hit[0] < best[0]):
                 best = (hit[0], candidate, hit[1], hit[2])
-        if best is None or best[0] > self.v.lane_keep_m:
+        reach = self.v.lane_keep_m * (2.0 if at_end else 1.0)
+        if best is None or best[0] > reach:
             return None
         return best[1], best[2], best[3]
+
+    def _at_edge_end(self, edge: str, lat: float, lon: float) -> bool:
+        """Whether a point projects onto the last metre of `edge`."""
+        shape = self._lane_shape(edge)
+        try:
+            x, y = self.traci.simulation.convertGeo(lon, lat, fromGeo=True)
+        except Exception:
+            return False
+        hit = _project(shape, x, y)
+        if hit is None:
+            return False
+        length = sum(math.dist(a, b) for a, b in zip(shape, shape[1:]))
+        return hit[1] >= length - 1.0
 
     def _pull_to_road(self, lat: float, lon: float,
                       dt: float) -> tuple[float, float]:

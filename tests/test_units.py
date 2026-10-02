@@ -1693,6 +1693,55 @@ def test_narrow_fork_follows_the_route():
     assert world._connected_snap(10.0, 0.0, "loop") is None     # on route
 
 
+def test_edge_end_hands_over_across_a_gap():
+    """Clamped at the end of a ramp whose successor starts 9 m on: the
+    successor takes over instead of the ramp's end pinning the fly."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "ramp"
+    world._route_edges = []
+    world._reachable = lambda e: ({"next"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"ramp": [(0.0, 0.0), (0.0, 94.0)], "next": [(0.0, 103.0), (0.0, 110.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    edge, pos, _xy = world._connected_snap(95.0, 0.0, "ramp")   # 1 m past end
+    assert edge == "next" and pos == 0.0, (edge, pos)
+    assert world._connected_snap(50.0, 0.0, "ramp") is None     # mid-ramp
+
+
+def test_eases_off_for_a_sharp_turn():
+    from types import SimpleNamespace
+
+    from dipteran.navigator import MotorOutput
+    from dipteran.world import TURN_SPEED_FLOOR, VehicleState, World
+
+    def speed_after(error_deg):
+        world = World.__new__(World)
+        world.state = VehicleState(lat=12.9, lon=77.6, heading=0.0,
+                                   heading_error_deg=error_deg)
+        world.v = SimpleNamespace(
+            steer_smoothing_s=0.0, steer_bias_tau_s=0.0, steer_scale=1.0,
+            throttle_scale=1.0, max_turn_deg_s=0.0, max_speed_ms=10.0,
+            max_accel_ms2=100.0, brake_ms2=100.0, kerb_turn_deg_s=0.0,
+            steer_right_gain=1.0, stall_window_s=5.0)
+        world._calibrating = 0
+        world._steer_rest = 0.0
+        world.traci = SimpleNamespace()
+        world._pull_to_road = lambda lat, lon, dt: (lat, lon)
+        world.apply(MotorOutput(throttle=1.0), 0.1)
+        return world.state.speed
+
+    assert abs(speed_after(0.0) - 10.0) < 1e-9
+    assert abs(speed_after(60.0) - 5.0) < 1e-9
+    assert abs(speed_after(170.0) - 10.0 * TURN_SPEED_FLOOR) < 1e-9
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]
