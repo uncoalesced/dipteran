@@ -84,6 +84,10 @@ VISUAL_RADIUS_M = 350.0
 # on such an edge indefinitely.
 ROUTE_RETRY_FRAMES = 50
 
+# How long the bristle channel fires on entering a potholed edge. See
+# `World._pothole_jolt`.
+POTHOLE_JOLT_S = 0.5
+
 def balanced_pfl3(half_angle_deg: float) -> float:
     """What both lobes read with the goal dead ahead, for a given lobe width.
 
@@ -204,8 +208,8 @@ def steering_drive(error_deg: float, half_angle_deg: float = 70.0
     sign, the way a pair of antennae or a pair of PFL3 populations do.
 
     THE RETURN IS CROSSED, and that is not a typo. PFL3 projects
-    contralaterally onto DNa02 -- measured directly from W, 12 synapses from
-    PFL3-right onto DNa02-left and zero onto DNa02-right, mirrored on the
+    contralaterally onto DNa02 -- measured directly from W, 238 synapses from the
+    12 PFL3-right cells onto DNa02-left and zero onto DNa02-right, mirrored on the
     other side. So a goal to the RIGHT must drive PFL3-LEFT in order to raise
     DNa02-right and turn right. This matches Nature 2024's PFL3R/PFL3L
     asymmetry. `tests/test_units.py` asserts the sign rather than trusting it:
@@ -678,7 +682,9 @@ class World:
         nearby, loom, horn = self._perceive(dt)
         s.nearby = nearby
 
-        pothole = is_pothole(s.edge, self.pothole_density) and s.speed > 1.0
+        pothole = self._pothole_jolt(
+            is_pothole(s.edge, self.pothole_density) and s.speed > 1.0,
+            s.edge, dt)
 
         net = self._net_speed_ms()
         if s.throttle_cmd > 0.3 and (s.realised_speed_ms < 0.5
@@ -721,6 +727,28 @@ class World:
             "acoustic_jo": horn,
             "mechano_bristle": 1.0 if pothole else 0.0,
         }
+
+    def _pothole_jolt(self, on_pothole: bool, edge: str, dt: float) -> bool:
+        """A pothole is a bump on entering the edge, not a buzz along it.
+
+        `mechano_bristle` drives all 1,417 bristle neurons. Held for the whole
+        of a potholed edge, it shifted the steering readout by -0.07 (probe,
+        2026-10-02: -0.016 -> -0.085 dead ahead, +0.011 -> -0.014 with the
+        route 60 deg right) -- more than the brain's entire right-turn
+        authority, so every potholed edge turned right turns into left
+        turns and fed the live steering fit a false offset. One short pulse
+        per potholed edge keeps the jolt and drops the bias.
+        """
+        if not on_pothole:
+            self._pothole_edge = None
+            self._jolt_s = 0.0
+            return False
+        if edge != getattr(self, "_pothole_edge", None):
+            self._pothole_edge = edge
+            self._jolt_s = POTHOLE_JOLT_S
+        jolt = getattr(self, "_jolt_s", 0.0) > 1e-9
+        self._jolt_s = max(0.0, getattr(self, "_jolt_s", 0.0) - dt)
+        return jolt
 
     def _update_route(self) -> None:
         """Recompute the road-network path to the goal, when the fly's
@@ -1488,15 +1516,30 @@ class World:
         succ, junctions, vias = self._reachable(last)
         if not succ and not junctions:
             return None
-        if nearest.startswith(":"):
-            if _junction_of(nearest) in junctions:
+        # A fork whose branches are still within `lane_keep_m` of each other
+        # is a choice the fly cannot see: both lanes are under it. Taking the
+        # nearer one sent it round the one-way loop south of Tin Factory
+        # (2026-10-02, the turn off `1298941842`: route `1370245924`, taken
+        # `172938155#0`, every lap). There the route's branch wins; once the
+        # branches are further apart than that, steering decides as before.
+        route = getattr(self, "_route_edges", ())
+        prefer = (next((e for e in succ if e in route), None)
+                  if nearest in succ and nearest not in route else None)
+        if prefer is None:
+            if nearest.startswith(":"):
+                if _junction_of(nearest) in junctions:
+                    return None
+            elif nearest in succ:
                 return None
-        elif nearest in succ:
-            return None
         try:
             x, y = self.traci.simulation.convertGeo(lon, lat, fromGeo=True)
         except Exception:
             return None
+        if prefer is not None:
+            hit = _project(self._lane_shape(prefer), x, y)
+            if hit is None or hit[0] > self.v.lane_keep_m:
+                return None
+            return prefer, hit[1], hit[2]
         best = None
         # The junction lanes matter: past the end of `last` they are the only
         # legal road until the successor starts, and without them the fly was

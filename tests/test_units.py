@@ -721,7 +721,7 @@ def test_steering_drive_sign_goal_to_the_right():
 
     `error = bearing_to_goal - heading`, positive means the goal is clockwise
     of the nose, i.e. to the right. PFL3 projects *contralaterally* onto
-    DNa02 (measured: 12 synapses PFL3-right -> DNa02-left, zero
+    DNa02 (measured: 238 synapses from the 12 PFL3-right cells -> DNa02-left, zero
     PFL3-right -> DNa02-right), so raising DNa02-right -- which is what
     `steer = right - left` needs for a positive, rightward steer -- requires
     driving PFL3-left.
@@ -1652,6 +1652,45 @@ def test_the_stall_timer_sees_a_jittering_pin():
     for i in range(51):                     # 5 s at 4 m/s due north
         world._track_position(lat0 + 0.4 * i / 111_320.0, 77.628487, 0.1)
     assert abs(world._net_speed_ms() - 4.0) < 0.05
+
+
+def test_pothole_is_a_jolt_not_a_buzz():
+    """A potholed edge held the 1,417-neuron bristle channel on for its
+    whole length and flipped right turns left. One 0.5 s pulse per edge."""
+    from dipteran.world import POTHOLE_JOLT_S, World
+
+    world = World.__new__(World)
+    frames = [world._pothole_jolt(True, "e1", 0.1) for _ in range(30)]
+    assert sum(frames) == round(POTHOLE_JOLT_S / 0.1), frames
+    assert frames[0] and not frames[-1]
+    assert world._pothole_jolt(True, "e2", 0.1)        # next potholed edge
+    assert not world._pothole_jolt(False, "e3", 0.1)
+    assert world._pothole_jolt(True, "e1", 0.1)        # re-entry jolts again
+
+
+def test_narrow_fork_follows_the_route():
+    """Two legal branches a few metres apart: the route's one wins; a branch
+    well clear of the route's is left to the fly."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "a"
+    world._route_edges = ["a", "route"]
+    world._reachable = lambda e: ({"route", "loop"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"route": [(3.0, 0.0), (3.0, 50.0)], "far": [(30.0, 0.0), (30.0, 50.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    edge, pos, _xy = world._connected_snap(10.0, 0.0, "loop")   # lat=y, lon=x
+    assert edge == "route" and abs(pos - 10.0) < 1e-6, (edge, pos)
+    shapes["route"] = shapes["far"]
+    assert world._connected_snap(10.0, 0.0, "loop") is None     # fly's call
+    world._route_edges = ["a", "loop"]
+    assert world._connected_snap(10.0, 0.0, "loop") is None     # on route
 
 
 def main() -> int:
