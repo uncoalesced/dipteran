@@ -1318,6 +1318,7 @@ class World:
             self._release_s = 5.0
             self._stuck_s = 0.0
         self._kerb_steer(dt)
+        self._turn_at_dead_end()
 
         try:
             x, y = traci.simulation.convertGeo(lon, lat, fromGeo=True)
@@ -1470,6 +1471,31 @@ class World:
         diff = wrap180(tangent - s.heading)
         turn = math.copysign(min(abs(diff), rate * dt), diff)
         s.heading = (s.heading + turn) % 360.0
+
+    def _turn_at_dead_end(self) -> None:
+        """Clamped at the end of an edge that goes nowhere: turn round.
+
+        Silk Board run on a472f46 (2026-10-03): the fly reached
+        `-800628086`, which has no successors, and sat 1 m from its end for
+        95 minutes. The road held its position and `_kerb_steer` held its
+        heading along the lane, cancelling the connectome's turn back toward
+        the route. A driver at a dead end turns round; so does this, and
+        its lane becomes the reverse carriageway when the network has one.
+        """
+        s = self.state
+        if s.speed < 1.0 or s.realised_speed_ms >= 0.5 * s.speed:
+            return
+        edge = s.edge
+        if not edge or edge.startswith(":"):
+            return
+        succ, junctions, _vias = self._reachable(edge)
+        if succ or junctions or not self._at_edge_end(edge, s.lat, s.lon):
+            return
+        s.heading = (s.heading + 180.0) % 360.0
+        reverse = edge[1:] if edge.startswith("-") else "-" + edge
+        if self._lane_shape(reverse) is not None:
+            self._last_normal_edge = reverse
+        print(f"[route] dead end at {edge}: turning round", flush=True)
 
     def _reachable(self, edge: str) -> tuple[set, set, set]:
         """(normal successor edges, junction ids, junction edges) reachable

@@ -1742,6 +1742,32 @@ def test_eases_off_for_a_sharp_turn():
     assert abs(speed_after(170.0) - 10.0 * TURN_SPEED_FLOOR) < 1e-9
 
 
+def test_dead_end_turns_round():
+    """Pinned at the end of an edge with no successors: heading flips and
+    the lane becomes the reverse carriageway. Mid-edge, nothing happens."""
+    from types import SimpleNamespace
+
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=30.5, lon=0.0, heading=240.0, speed=3.5,
+                               realised_speed_ms=0.0, edge="-800628086")
+    world._reachable = lambda e: (set(), set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"-800628086": [(0.0, 0.0), (0.0, 31.0)],
+              "800628086": [(0.0, 31.0), (0.0, 0.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    world._turn_at_dead_end()
+    assert world.state.heading == 60.0, world.state.heading
+    assert world._last_normal_edge == "800628086"
+
+    world.state.lat, world.state.heading = 10.0, 240.0
+    world._turn_at_dead_end()
+    assert world.state.heading == 240.0
+
+
 def main() -> int:
     tests = [(name, fn) for name, fn in sorted(globals().items())
              if name.startswith("test_") and callable(fn)]
