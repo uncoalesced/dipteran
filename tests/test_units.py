@@ -1742,6 +1742,28 @@ def test_eases_off_for_a_sharp_turn():
     assert abs(speed_after(170.0) - 10.0 * TURN_SPEED_FLOOR) < 1e-9
 
 
+def test_repeat_fork_widens_the_window():
+    """Route branch 12 m off: first pass is the fly's call, a repeat lap
+    through the same edge gets the route's branch."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "a"
+    world._route_edges = ["a", "route"]
+    world._reachable = lambda e: ({"route", "loop"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    world._lane_shape = lambda e: {"route": [(12.0, 0.0), (12.0, 50.0)]}.get(e)
+
+    assert world._connected_snap(10.0, 0.0, "loop") is None
+    world._visits = {"a": 2}
+    edge, _pos, _xy = world._connected_snap(10.0, 0.0, "loop")
+    assert edge == "route", edge
+
+
 def test_dead_end_turns_round():
     """Pinned at the end of an edge with no successors: heading flips and
     the lane becomes the reverse carriageway. Mid-edge, nothing happens."""

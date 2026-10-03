@@ -1584,7 +1584,14 @@ class World:
             return None
         if prefer is not None:
             hit = _project(self._lane_shape(prefer), x, y)
-            if hit is None or hit[0] > self.v.lane_keep_m:
+            # A fork the fly keeps failing earns a wider window: each repeat
+            # visit to `last` adds `lane_keep_m`, up to four. Silk Board run
+            # on 02e69fb (2026-10-03): over-turning left off `543470383#5`
+            # onto `-59358782#2`, past the 8 m window, a 137 s loop five
+            # times over. First passes are unchanged.
+            visits = getattr(self, "_visits", {}).get(last, 1)
+            reach = self.v.lane_keep_m * min(4, max(1, visits))
+            if hit is None or hit[0] > reach:
                 return None
             return prefer, hit[1], hit[2]
         best = None
@@ -1630,6 +1637,9 @@ class World:
         self.state.edge = edge
         self.state.edge_pos = pos
         if not edge.startswith(":"):
+            if edge != getattr(self, "_last_normal_edge", ""):
+                visits = self.__dict__.setdefault("_visits", {})
+                visits[edge] = visits.get(edge, 0) + 1
             self._last_normal_edge = edge
         try:
             if snapped is None:
