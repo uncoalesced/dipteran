@@ -1612,13 +1612,24 @@ class World:
         # legal road until the successor starts, and without them the fly was
         # pulled back to the edge end every frame, pinned.
         candidates = (*succ, *vias) if at_end else (last, *succ, *vias)
+        reach = self.v.lane_keep_m * (2.0 if at_end else 1.0)
         for candidate in candidates:
             if blind(candidate):
                 continue
             hit = _project(self._lane_shape(candidate), x, y)
-            if hit is not None and (best is None or hit[0] < best[0]):
-                best = (hit[0], candidate, hit[1], hit[2])
-        reach = self.v.lane_keep_m * (2.0 if at_end else 1.0)
+            if hit is None:
+                continue
+            # Off the end of an edge, a successor on the route beats a nearer
+            # one that is not. Silk Board run on f723e2e (2026-10-03): the
+            # route ran straight on to `1124616640#4`, 9 m past the end of
+            # `1124616640#2`; a zero-length connector 5 m away led back
+            # south, and nearest-wins took it 34 laps running.
+            key = (not (at_end and candidate in route and hit[0] <= reach),
+                   hit[0])
+            if best is None or key < best[0]:
+                best = (key, candidate, hit[1], hit[2])
+        if best is not None:
+            best = (best[0][1], *best[1:])
         if best is None or best[0] > reach:
             return None
         return best[1], best[2], best[3]

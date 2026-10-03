@@ -1715,6 +1715,29 @@ def test_edge_end_hands_over_across_a_gap():
     assert world._connected_snap(50.0, 0.0, "ramp") is None     # mid-ramp
 
 
+def test_edge_end_hands_over_to_the_route():
+    """Off the end of an edge: the route's successor 9 m on beats a
+    connector 5 m away that leads back (the 34-lap loop, 2026-10-03)."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "e2"
+    world._route_edges = ["e2", "e4"]
+    world._reachable = lambda e: ({"e4", "back"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"e2": [(0.0, 0.0), (0.0, 88.0)],
+              "e4": [(0.0, 97.0), (0.0, 150.0)],
+              "back": [(5.0, 88.0), (40.0, 88.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    edge, _pos, _xy = world._connected_snap(89.0, 0.0, "e2")
+    assert edge == "e4", edge
+
+
 def test_eases_off_for_a_sharp_turn():
     from types import SimpleNamespace
 
