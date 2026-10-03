@@ -1764,6 +1764,31 @@ def test_repeat_fork_widens_the_window():
     assert edge == "route", edge
 
 
+def test_dead_end_branch_is_not_taken():
+    """Off-route branch with no successors: the through branch 5 m away
+    wins. On the route, a dead end is still allowed (it is the goal)."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "a"
+    world._route_edges = ["a", "far"]
+    reach = {"a": ({"blind", "through", "far"}, set(), set()),
+             "blind": (set(), set(), set())}
+    world._reachable = lambda e: reach.get(e, ({"x"}, set(), set()))
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    world._lane_shape = lambda e: {"through": [(5.0, 0.0), (5.0, 50.0)],
+                                   "far": [(90.0, 0.0), (90.0, 50.0)]}.get(e)
+
+    edge, _pos, _xy = world._connected_snap(10.0, 0.0, "blind")
+    assert edge == "through", edge
+    world._route_edges = ["a", "blind"]
+    assert world._connected_snap(10.0, 0.0, "blind") is None
+
+
 def test_dead_end_turns_round():
     """Pinned at the end of an edge with no successors: heading flips and
     the lane becomes the reverse carriageway. Mid-edge, nothing happens."""

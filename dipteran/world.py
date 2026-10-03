@@ -1572,7 +1572,19 @@ class World:
         route = getattr(self, "_route_edges", ())
         prefer = (next((e for e in succ if e in route), None)
                   if nearest in succ and nearest not in route else None)
-        if prefer is None and not at_end:
+
+        # A branch that goes nowhere is not a turn a driver takes unless it
+        # is the destination. 5 km rung on 10cd9f5 (2026-10-03): four
+        # dead-end side streets in 35 minutes, each a wrong turn the U-turn
+        # then had to undo.
+        def blind(e: str) -> bool:
+            if e not in succ or e in route:
+                return False
+            nxt, nxt_junctions, _ = self._reachable(e)
+            return not nxt and not nxt_junctions
+
+        blocked = blind(nearest)
+        if prefer is None and not at_end and not blocked:
             if nearest.startswith(":"):
                 if _junction_of(nearest) in junctions:
                     return None
@@ -1591,15 +1603,18 @@ class World:
             # times over. First passes are unchanged.
             visits = getattr(self, "_visits", {}).get(last, 1)
             reach = self.v.lane_keep_m * min(4, max(1, visits))
-            if hit is None or hit[0] > reach:
+            if hit is not None and hit[0] <= reach:
+                return prefer, hit[1], hit[2]
+            if not blocked:
                 return None
-            return prefer, hit[1], hit[2]
         best = None
         # The junction lanes matter: past the end of `last` they are the only
         # legal road until the successor starts, and without them the fly was
         # pulled back to the edge end every frame, pinned.
         candidates = (*succ, *vias) if at_end else (last, *succ, *vias)
         for candidate in candidates:
+            if blind(candidate):
+                continue
             hit = _project(self._lane_shape(candidate), x, y)
             if hit is not None and (best is None or hit[0] < best[0]):
                 best = (hit[0], candidate, hit[1], hit[2])
