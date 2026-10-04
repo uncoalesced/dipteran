@@ -84,6 +84,13 @@ VISUAL_RADIUS_M = 350.0
 # on such an edge indefinitely.
 ROUTE_RETRY_FRAMES = 50
 
+# How long the bristle channel fires on entering a potholed edge. See
+# `World._pothole_jolt`.
+POTHOLE_JOLT_S = 0.5
+
+# Slowest fraction of commanded speed `World.apply` eases to for a sharp turn.
+TURN_SPEED_FLOOR = 0.4
+
 def balanced_pfl3(half_angle_deg: float) -> float:
     """What both lobes read with the goal dead ahead, for a given lobe width.
 
@@ -127,6 +134,31 @@ def wrap180(deg: float) -> float:
     either way, and every caller here consumes the magnitude.
     """
     return (deg + 180.0) % 360.0 - 180.0
+
+
+def _junction_of(internal_edge: str) -> str:
+    """Junction id of an internal edge id, `:<junction>_<index>`."""
+    return internal_edge[1:].rsplit("_", 1)[0]
+
+
+def _project(shape, x: float, y: float):
+    """Nearest point on a polyline: (distance, position along it, (x, y)),
+    or None for a missing or degenerate shape."""
+    if not shape or len(shape) < 2:
+        return None
+    best, along = None, 0.0
+    for (x0, y0), (x1, y1) in zip(shape, shape[1:]):
+        dx, dy = x1 - x0, y1 - y0
+        seg = math.hypot(dx, dy)
+        if seg <= 0.0:
+            continue
+        t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / (seg * seg)))
+        px, py = x0 + dx * t, y0 + dy * t
+        d = math.hypot(x - px, y - py)
+        if best is None or d < best[0]:
+            best = (d, along + seg * t, (px, py))
+        along += seg
+    return best
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -179,8 +211,8 @@ def steering_drive(error_deg: float, half_angle_deg: float = 70.0
     sign, the way a pair of antennae or a pair of PFL3 populations do.
 
     THE RETURN IS CROSSED, and that is not a typo. PFL3 projects
-    contralaterally onto DNa02 -- measured directly from W, 12 synapses from
-    PFL3-right onto DNa02-left and zero onto DNa02-right, mirrored on the
+    contralaterally onto DNa02 -- measured directly from W, 238 synapses from the
+    12 PFL3-right cells onto DNa02-left and zero onto DNa02-right, mirrored on the
     other side. So a goal to the RIGHT must drive PFL3-LEFT in order to raise
     DNa02-right and turn right. This matches Nature 2024's PFL3R/PFL3L
     asymmetry. `tests/test_units.py` asserts the sign rather than trusting it:
@@ -653,7 +685,9 @@ class World:
         nearby, loom, horn = self._perceive(dt)
         s.nearby = nearby
 
-        pothole = is_pothole(s.edge, self.pothole_density) and s.speed > 1.0
+        pothole = self._pothole_jolt(
+            is_pothole(s.edge, self.pothole_density) and s.speed > 1.0,
+            s.edge, dt)
 
         net = self._net_speed_ms()
         if s.throttle_cmd > 0.3 and (s.realised_speed_ms < 0.5
@@ -696,6 +730,28 @@ class World:
             "acoustic_jo": horn,
             "mechano_bristle": 1.0 if pothole else 0.0,
         }
+
+    def _pothole_jolt(self, on_pothole: bool, edge: str, dt: float) -> bool:
+        """A pothole is a bump on entering the edge, not a buzz along it.
+
+        `mechano_bristle` drives all 1,417 bristle neurons. Held for the whole
+        of a potholed edge, it shifted the steering readout by -0.07 (probe,
+        2026-10-02: -0.016 -> -0.085 dead ahead, +0.011 -> -0.014 with the
+        route 60 deg right) -- more than the brain's entire right-turn
+        authority, so every potholed edge turned right turns into left
+        turns and fed the live steering fit a false offset. One short pulse
+        per potholed edge keeps the jolt and drops the bias.
+        """
+        if not on_pothole:
+            self._pothole_edge = None
+            self._jolt_s = 0.0
+            return False
+        if edge != getattr(self, "_pothole_edge", None):
+            self._pothole_edge = edge
+            self._jolt_s = POTHOLE_JOLT_S
+        jolt = getattr(self, "_jolt_s", 0.0) > 1e-9
+        self._jolt_s = max(0.0, getattr(self, "_jolt_s", 0.0) - dt)
+        return jolt
 
     def _update_route(self) -> None:
         """Recompute the road-network path to the goal, when the fly's
@@ -1166,23 +1222,30 @@ class World:
         # average quietly subtracted the sustained left the fly needed,
         # leaving a zero-mean command against a one-sided road.
         bias_tau = self.v.steer_bias_tau_s
+        gain_left = gain_right = 1.0
         if bias_tau > 0.0:
-            if abs(s.heading_error_deg) <= self.v.steer_bias_window_deg:
+            fit = None
+            if motor.panic <= 0.0:
+                fit = self._steer_fit(raw_steer, s.heading_error_deg,
+                                      s.speed, dt)
+            if fit is not None:
+                self._steer_rest, gain_left, gain_right = fit
+            elif abs(s.heading_error_deg) <= self.v.steer_bias_window_deg:
                 self._steer_rest += ((motor.steer - self._steer_rest)
                                      * min(1.0, dt / bias_tau))
             raw_steer -= self._steer_rest
         s.steer_filtered = raw_steer
-        # Right turns get their own gain because the connectome gives them
-        # less authority. DNa02-left rests silent, so a right turn can only
-        # be expressed by raising DNa02-right above its balanced 104.5 Hz,
-        # and PFL3 at full scale only lifts it to 118.7 Hz (+14.2), while a
-        # left turn pulls it down to 78.4 Hz (-26.1). Test F in
-        # scripts/probe_diagnostics.py measures both. At equal gain a target
-        # 30-60 degrees right barely turned the fly: that was the wrong
-        # branch behind item 4's goal swarming and behind the ~25 sim-min
-        # circle on the 2026-09-27b Silk Board run.
+        # Per-side gain. The right side started with a fixed gain taken from
+        # the static probe (Test F: +14.2 Hz of authority to the right against
+        # -26.1 Hz to the left). Measured live near Tin Factory, 2026-09-28,
+        # it was the other way round: +0.030 at +50 deg against -0.015 at
+        # -50 deg, both from the true zero-error readout. Each side's gain is
+        # therefore taken from the live fit (`_steer_fit`), and
+        # `steer_right_gain` stays only as a manual multiplier, 1.0 by default.
         if raw_steer > 0.0:
-            raw_steer *= self.v.steer_right_gain
+            raw_steer *= gain_right * self.v.steer_right_gain
+        else:
+            raw_steer *= gain_left
         steer = max(-1.0, min(1.0, raw_steer * self.v.steer_scale))
         throttle = max(0.0, min(1.0, motor.throttle * self.v.throttle_scale))
 
@@ -1215,7 +1278,16 @@ class World:
                 s.heading = (s.heading
                              + math.copysign(45.0, steer or 1.0)) % 360.0
         else:
-            target = throttle * self.v.max_speed_ms
+            # Ease off for a turn, as a driver does. Right turns get about
+            # half the connectome's left-turn authority (probe, 2026-10-02:
+            # +0.028 vs -0.063 at 75 deg), and at full speed a 55-degree
+            # right at the end of `-362215135`, 329 m from Tin Factory, was
+            # over before the heading caught up; the snap took the straight
+            # branch. cos(error) costs nothing on a straight road (0.99 at
+            # the 9-degree median) and halves the speed into a sharp turn.
+            turn = max(TURN_SPEED_FLOOR,
+                       math.cos(math.radians(min(90.0, abs(s.heading_error_deg)))))
+            target = throttle * self.v.max_speed_ms * turn
             delta = target - s.speed
             rate = self.v.max_accel_ms2 if delta > 0 else self.v.brake_ms2
             s.speed = max(0.0, s.speed + math.copysign(
@@ -1233,7 +1305,20 @@ class World:
         s.realised_speed_ms = moved / max(dt, 1e-6)
         s.lat, s.lon = lat, lon
         self._track_position(lat, lon, dt)
+        # Lane-keeping release timer -- see `_connected_snap`.
+        net = self._net_speed_ms()
+        if s.speed > 1.0 and net is not None and net < 0.5:
+            self._stuck_s = getattr(self, "_stuck_s", 0.0) + dt
+        elif getattr(self, "_release_s", 0.0) <= 0.0:
+            self._stuck_s = 0.0
+        if getattr(self, "_release_s", 0.0) > 0.0:
+            self._release_s -= dt
+        elif (getattr(self, "_stuck_s", 0.0) > 0.0
+              and self._stuck_s > self.v.lane_keep_release_s):
+            self._release_s = 5.0
+            self._stuck_s = 0.0
         self._kerb_steer(dt)
+        self._turn_at_dead_end()
 
         try:
             x, y = traci.simulation.convertGeo(lon, lat, fromGeo=True)
@@ -1247,6 +1332,68 @@ class World:
             traci.vehicle.setSpeed(EGO_ID, s.speed)
         except Exception:
             pass
+
+    def _steer_fit(self, readout: float, error_deg: float, speed: float,
+                   dt: float) -> tuple[float, float, float] | None:
+        """Live fit of the steering readout against heading error.
+
+        Returns (resting offset, left gain, right gain), or None while there
+        is not enough data to trust a fit.
+
+        The offset used to be estimated only while |error| <= 10 degrees, and
+        that trapped the fly. Traced near Tin Factory, 2026-09-28: the
+        offset came from the parked calibration (-0.013) and the zero-error
+        readout while driving was +0.001. Subtracting the stale value put
+        the fly's equilibrium at a standing -35 deg error, so the window
+        almost never opened (14 of 2,847 frames) and the offset never
+        corrected. The fly crabbed 25-35 deg off the road and drifted right
+        at junctions, onto branches off its route.
+
+        This fits `readout = rest + k_left * min(err, 0) + k_right *
+        max(err, 0)` over exponentially weighted frames (time constant
+        `steer_bias_tau_s`, errors inside `steer_fit_window_deg`) and takes
+        the intercept as the offset. The intercept extrapolates to zero
+        error from wherever the fly actually is, so no window has to open.
+        While both slopes have the correct sign, each side's gain is
+        normalised toward their mean, clamped to [0.5, 2].
+        """
+        stats = getattr(self, "_fit_stats", None)
+        if stats is None:
+            stats = self._fit_stats = [0.0] * 8
+        window = self.v.steer_fit_window_deg
+        if speed < 1.0 or abs(error_deg) > window:
+            return None
+        decay = 1.0 - min(1.0, dt / self.v.steer_bias_tau_s)
+        u, v = min(error_deg, 0.0), max(error_deg, 0.0)
+        for i, value in enumerate((1.0, u, v, readout, u * u, v * v,
+                                   u * readout, v * readout)):
+            stats[i] = stats[i] * decay + value
+        n, su, sv, sy, suu, svv, suy, svy = stats
+        # About 10 s of frames before any fit, and 25 deg^2 of spread
+        # (a 5 deg standard deviation) on a side before that side counts.
+        if n < 10.0 / dt:
+            return None
+        left_ok = suu / n - (su / n) ** 2 > 25.0
+        right_ok = svv / n - (sv / n) ** 2 > 25.0
+        den, num = n, sy
+        if left_ok:
+            den -= su * su / suu
+            num -= su * suy / suu
+        if right_ok:
+            den -= sv * sv / svv
+            num -= sv * svy / svv
+        if not (left_ok or right_ok) or den < 0.05 * n:
+            return None
+        rest = num / den
+        gain_left = gain_right = 1.0
+        if left_ok and right_ok:
+            k_left = (suy - su * rest) / suu
+            k_right = (svy - sv * rest) / svv
+            if k_left > 0.0 and k_right > 0.0:
+                k_mean = 0.5 * (k_left + k_right)
+                gain_left = max(0.5, min(2.0, k_mean / k_left))
+                gain_right = max(0.5, min(2.0, k_mean / k_right))
+        return rest, gain_left, gain_right
 
     def _track_position(self, lat: float, lon: float, dt: float) -> None:
         """Keep the last `stall_window_s` of positions for `_net_speed_ms`."""
@@ -1325,19 +1472,204 @@ class World:
         turn = math.copysign(min(abs(diff), rate * dt), diff)
         s.heading = (s.heading + turn) % 360.0
 
+    def _turn_at_dead_end(self) -> None:
+        """Clamped at the end of an edge that goes nowhere: turn round.
+
+        Silk Board run on a472f46 (2026-10-03): the fly reached
+        `-800628086`, which has no successors, and sat 1 m from its end for
+        95 minutes. The road held its position and `_kerb_steer` held its
+        heading along the lane, cancelling the connectome's turn back toward
+        the route. A driver at a dead end turns round; so does this, and
+        its lane becomes the reverse carriageway when the network has one.
+        """
+        s = self.state
+        if s.speed < 1.0 or s.realised_speed_ms >= 0.5 * s.speed:
+            return
+        edge = s.edge
+        if not edge or edge.startswith(":"):
+            return
+        succ, junctions, _vias = self._reachable(edge)
+        if succ or junctions or not self._at_edge_end(edge, s.lat, s.lon):
+            return
+        s.heading = (s.heading + 180.0) % 360.0
+        reverse = edge[1:] if edge.startswith("-") else "-" + edge
+        if self._lane_shape(reverse) is not None:
+            self._last_normal_edge = reverse
+        print(f"[route] dead end at {edge}: turning round", flush=True)
+
+    def _reachable(self, edge: str) -> tuple[set, set, set]:
+        """(normal successor edges, junction ids, junction edges) reachable
+        from `edge`.
+
+        Read from SUMO's own connection table (`lane.getLinks`) and cached:
+        topology does not change during a run.
+        """
+        cache = getattr(self, "_reach_cache", None)
+        if cache is None:
+            cache = self._reach_cache = {}
+        if edge not in cache:
+            succ, junctions, vias = set(), set(), set()
+            try:
+                for i in range(self.traci.edge.getLaneNumber(edge)):
+                    for link in self.traci.lane.getLinks(f"{edge}_{i}"):
+                        succ.add(link[0].rsplit("_", 1)[0])
+                        via = link[4] if len(link) > 4 else ""
+                        if via:
+                            vias.add(via.rsplit("_", 1)[0])
+                            junctions.add(_junction_of(via.rsplit("_", 1)[0]))
+            except Exception:
+                pass
+            cache[edge] = (succ, junctions, vias)
+        return cache[edge]
+
+    def _connected_snap(self, lat: float, lon: float, nearest: str):
+        """Refuse a snap onto a road the fly's lane does not connect to.
+
+        `_edge_at` answers with the nearest lane anywhere in the network. In
+        2D, flyovers, the roads beneath them and the opposite carriageway
+        all lie within a few metres of each other, so a fly 1-2 m off its
+        lane could be snapped onto one of them and teleported onto another
+        road. Traced near Tin Factory, 2026-09-28: from `1356191564#0`
+        (position 72) onto `1089715166` (position 317), which is not a
+        successor, and from `1370245925` onto `-1504434604`, the reverse
+        carriageway of its next route edge. Each jump added ~400-1,200 m of
+        route.
+
+        The fly may be snapped onto its last normal edge, that edge's SUMO
+        successors, or the junction lanes that connect to them. Every legal
+        turn stays open, so which branch it takes is still up to the fly.
+        Returns None when `nearest` is already legal, or when no legal lane
+        lies within `vehicle.lane_keep_m` (the fly is genuinely elsewhere),
+        otherwise (edge, pos, (x, y)) on the nearest legal lane.
+        """
+        last = getattr(self, "_last_normal_edge", "")
+        if not last:
+            return None
+        # Pressed against the far end of its own edge, the fly can only go
+        # on to a successor -- but where netconvert left a gap (Silk Board
+        # run, 2026-10-03: `380724493#0-AddedOnRampEdge` ends 9 m short of
+        # its only successor) that edge's end stays the nearest lane, and the
+        # pull hauled the fly back to it every frame for 400+ s. Past the end
+        # the successors take over, up to twice `lane_keep_m` away.
+        at_end = nearest == last and self._at_edge_end(last, lat, lon)
+        if nearest == last and not at_end:
+            return None
+        if getattr(self, "_release_s", 0.0) > 0.0:
+            # Stuck for `lane_keep_release_s` with the motor open: whatever
+            # the constraint is protecting, it is now what holds the fly.
+            # Plain nearest-lane snapping for a few seconds, as before this
+            # existed, and the fly's lane restarts from wherever that puts it.
+            return None
+        succ, junctions, vias = self._reachable(last)
+        if not succ and not junctions:
+            return None
+        # A fork whose branches are still within `lane_keep_m` of each other
+        # is a choice the fly cannot see: both lanes are under it. Taking the
+        # nearer one sent it round the one-way loop south of Tin Factory
+        # (2026-10-02, the turn off `1298941842`: route `1370245924`, taken
+        # `172938155#0`, every lap). There the route's branch wins; once the
+        # branches are further apart than that, steering decides as before.
+        route = getattr(self, "_route_edges", ())
+        prefer = (next((e for e in succ if e in route), None)
+                  if nearest in succ and nearest not in route else None)
+
+        # A branch that goes nowhere is not a turn a driver takes unless it
+        # is the destination. 5 km rung on 10cd9f5 (2026-10-03): four
+        # dead-end side streets in 35 minutes, each a wrong turn the U-turn
+        # then had to undo.
+        def blind(e: str) -> bool:
+            if e not in succ or e in route:
+                return False
+            nxt, nxt_junctions, _ = self._reachable(e)
+            return not nxt and not nxt_junctions
+
+        blocked = blind(nearest)
+        if prefer is None and not at_end and not blocked:
+            if nearest.startswith(":"):
+                if _junction_of(nearest) in junctions:
+                    return None
+            elif nearest in succ:
+                return None
+        try:
+            x, y = self.traci.simulation.convertGeo(lon, lat, fromGeo=True)
+        except Exception:
+            return None
+        if prefer is not None:
+            hit = _project(self._lane_shape(prefer), x, y)
+            # A fork the fly keeps failing earns a wider window: each repeat
+            # visit to `last` adds `lane_keep_m`, up to four. Silk Board run
+            # on 02e69fb (2026-10-03): over-turning left off `543470383#5`
+            # onto `-59358782#2`, past the 8 m window, a 137 s loop five
+            # times over. First passes are unchanged.
+            visits = getattr(self, "_visits", {}).get(last, 1)
+            reach = self.v.lane_keep_m * min(4, max(1, visits))
+            if hit is not None and hit[0] <= reach:
+                return prefer, hit[1], hit[2]
+            if not blocked:
+                return None
+        best = None
+        # The junction lanes matter: past the end of `last` they are the only
+        # legal road until the successor starts, and without them the fly was
+        # pulled back to the edge end every frame, pinned.
+        candidates = (*succ, *vias) if at_end else (last, *succ, *vias)
+        reach = self.v.lane_keep_m * (2.0 if at_end else 1.0)
+        for candidate in candidates:
+            if blind(candidate):
+                continue
+            hit = _project(self._lane_shape(candidate), x, y)
+            if hit is None:
+                continue
+            # Off the end of an edge, a successor on the route beats a nearer
+            # one that is not. Silk Board run on f723e2e (2026-10-03): the
+            # route ran straight on to `1124616640#4`, 9 m past the end of
+            # `1124616640#2`; a zero-length connector 5 m away led back
+            # south, and nearest-wins took it 34 laps running.
+            key = (not (at_end and candidate in route and hit[0] <= reach),
+                   hit[0])
+            if best is None or key < best[0]:
+                best = (key, candidate, hit[1], hit[2])
+        if best is not None:
+            best = (best[0][1], *best[1:])
+        if best is None or best[0] > reach:
+            return None
+        return best[1], best[2], best[3]
+
+    def _at_edge_end(self, edge: str, lat: float, lon: float) -> bool:
+        """Whether a point projects onto the last metre of `edge`."""
+        shape = self._lane_shape(edge)
+        try:
+            x, y = self.traci.simulation.convertGeo(lon, lat, fromGeo=True)
+        except Exception:
+            return False
+        hit = _project(shape, x, y)
+        if hit is None:
+            return False
+        length = sum(math.dist(a, b) for a, b in zip(shape, shape[1:]))
+        return hit[1] >= length - 1.0
+
     def _pull_to_road(self, lat: float, lon: float,
                       dt: float) -> tuple[float, float]:
-        """Close part of the gap back to the nearest road, and record it."""
+        """Close part of the gap back to the nearest *connected* road, and
+        record it."""
         traci = self.traci
         edge, pos, lane = self._edge_at(lat, lon)
         if not edge:
             self.state.off_road_m = float("inf")
             return lat, lon
 
+        snapped = self._connected_snap(lat, lon, edge)
+        if snapped is not None:
+            edge, pos, (x, y) = snapped
         self.state.edge = edge
         self.state.edge_pos = pos
+        if not edge.startswith(":"):
+            if edge != getattr(self, "_last_normal_edge", ""):
+                visits = self.__dict__.setdefault("_visits", {})
+                visits[edge] = visits.get(edge, 0) + 1
+            self._last_normal_edge = edge
         try:
-            x, y = traci.simulation.convert2D(edge, pos, lane)
+            if snapped is None:
+                x, y = traci.simulation.convert2D(edge, pos, lane)
             road_lon, road_lat = traci.simulation.convertGeo(x, y)
         except Exception:
             return lat, lon
@@ -1502,6 +1834,9 @@ class World:
         s.stalled_s = 0.0
         self._positions = collections.deque()
         self._panic_prev = False
+        self._fit_stats = None
+        self._last_normal_edge = ""
+        self._stuck_s = self._release_s = 0.0
         s.off_road_m = 0.0
         s.nearby = []
         s.distance_to_goal_m = haversine_m(*self.origin, *self.goal)

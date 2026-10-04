@@ -206,7 +206,7 @@ CLUSTERS: dict[str, Cluster] = {
     # See `scripts/probe_diagnostics.py` Tests E and F.
     #
     # THE PROJECTION IS CONTRALATERAL, and this is measured from W directly,
-    # not assumed: DNa02-left receives 12 synapses from PFL3-right and zero
+    # not assumed: DNa02-left receives 238 synapses from all 12 PFL3-right cells and zero
     # from PFL3-left; DNa02-right is the mirror. So driving PFL3-LEFT turns
     # the vehicle RIGHT. That matches Nature 2024's "PFL3R cells are recruited
     # when the fly is oriented to the left of its goal, and their activity

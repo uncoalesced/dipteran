@@ -721,7 +721,7 @@ def test_steering_drive_sign_goal_to_the_right():
 
     `error = bearing_to_goal - heading`, positive means the goal is clockwise
     of the nose, i.e. to the right. PFL3 projects *contralaterally* onto
-    DNa02 (measured: 12 synapses PFL3-right -> DNa02-left, zero
+    DNa02 (measured: 238 synapses from the 12 PFL3-right cells -> DNa02-left, zero
     PFL3-right -> DNa02-right), so raising DNa02-right -- which is what
     `steer = right - left` needs for a positive, rightward steer -- requires
     driving PFL3-left.
@@ -1549,6 +1549,89 @@ def test_right_turns_get_the_measured_extra_gain():
     assert abs(turned(-0.01) + 0.01 * 10.0 * 45.0 * 0.1) < 1e-9
 
 
+def test_the_live_steering_fit_finds_the_true_offset_from_a_crab():
+    """Tin Factory trace, 2026-09-28: the parked offset was -0.013, the true
+    zero-error readout +0.001, and the fly settled at a standing -35 deg
+    error where the old +/-10 deg window never opened. The fit has to
+    recover the true offset from one-sided data, then even out the sides
+    once both are seen."""
+    import math
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    def readout(err):
+        return 0.001 + 0.0003 * min(err, 0.0) + 0.0006 * max(err, 0.0)
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(steer_bias_tau_s=30.0, steer_fit_window_deg=60.0)
+    fit = None
+    for i in range(600):                     # 60 s crabbing at -20..-50
+        err = -35.0 + 15.0 * math.sin(i / 20.0)
+        fit = world._steer_fit(readout(err), err, 4.0, 0.1) or fit
+    assert fit is not None and abs(fit[0] - 0.001) < 1e-4, fit
+    assert fit[1:] == (1.0, 1.0), "one side only: no gain correction"
+
+    for i in range(3000):                    # 300 s across both sides
+        err = 40.0 * math.sin(i / 20.0)
+        fit = world._steer_fit(readout(err), err, 4.0, 0.1) or fit
+    rest, gain_left, gain_right = fit
+    assert abs(rest - 0.001) < 1e-4, rest
+    # Slopes 0.0003 left, 0.0006 right: mean 0.00045.
+    assert abs(gain_left - 1.5) < 0.02 and abs(gain_right - 0.75) < 0.02, fit
+
+    # Parked, or a target far behind: no update.
+    assert world._steer_fit(0.5, 0.0, 0.0, 0.1) is None
+    assert world._steer_fit(0.5, 120.0, 4.0, 0.1) is None
+
+
+def test_the_fly_is_not_teleported_onto_an_unconnected_road():
+    """Tin Factory trace, 2026-09-28: 1-2 m off its lane, the fly was
+    snapped onto an overlapping road it has no connection to (a parallel
+    road, and the reverse carriageway), adding ~400-1,200 m of route.
+    Legal successors must still be accepted."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    # A runs east along y=0 into junction J, then B continues east; R is an
+    # unconnected road 2 m north, running the other way.
+    world._lane_shapes = {"A": [(0.0, 0.0), (100.0, 0.0)],
+                          "B": [(105.0, 0.0), (200.0, 0.0)],
+                          ":J_0": [(100.0, 0.0), (105.0, 0.0)],
+                          "R": [(200.0, 2.0), (0.0, 2.0)]}
+    world.traci = SimpleNamespace(
+        edge=SimpleNamespace(getLaneNumber=lambda e: 1),
+        lane=SimpleNamespace(getLinks=lambda lane: (
+            [("B_0", True, True, False, ":J_0_0", "G", "s", 5.0)]
+            if lane == "A_0" else [])),
+        simulation=SimpleNamespace(
+            convertGeo=lambda lon, lat, fromGeo=False: (lon, lat)))
+    world._last_normal_edge = "A"
+
+    # 1.5 m north of A at x=60: nearest is R, which A cannot reach.
+    edge, pos, (x, y) = world._connected_snap(1.5, 60.0, "R")
+    assert edge == "A" and abs(pos - 60.0) < 1e-9 and (x, y) == (60.0, 0.0)
+
+    # Past A's end, before B starts, the legal road is the junction lane.
+    # Without it the fly was pulled back to A's end every frame, pinned.
+    edge, pos, (x, y) = world._connected_snap(1.5, 102.5, "R")
+    assert edge == ":J_0" and abs(pos - 2.5) < 1e-9, (edge, pos)
+
+    # Legal moves are left alone: A's successor, and junction J's lanes.
+    assert world._connected_snap(0.5, 150.0, "B") is None
+    assert world._connected_snap(0.5, 102.0, ":J_0") is None
+
+    # Far from every legal lane, the fly really is elsewhere.
+    assert world._connected_snap(50.0, 60.0, "R") is None
+
+    # Stuck long enough, lane-keeping lets go rather than hold the fly.
+    world._release_s = 3.0
+    assert world._connected_snap(1.5, 60.0, "R") is None
+
+
 def test_the_stall_timer_sees_a_jittering_pin():
     """Pinned at Silk Board, realised speed swung 0.1-1.9 m/s frame to frame
     with no net progress, so the instantaneous stall test kept resetting."""
@@ -1569,6 +1652,190 @@ def test_the_stall_timer_sees_a_jittering_pin():
     for i in range(51):                     # 5 s at 4 m/s due north
         world._track_position(lat0 + 0.4 * i / 111_320.0, 77.628487, 0.1)
     assert abs(world._net_speed_ms() - 4.0) < 0.05
+
+
+def test_pothole_is_a_jolt_not_a_buzz():
+    """A potholed edge held the 1,417-neuron bristle channel on for its
+    whole length and flipped right turns left. One 0.5 s pulse per edge."""
+    from dipteran.world import POTHOLE_JOLT_S, World
+
+    world = World.__new__(World)
+    frames = [world._pothole_jolt(True, "e1", 0.1) for _ in range(30)]
+    assert sum(frames) == round(POTHOLE_JOLT_S / 0.1), frames
+    assert frames[0] and not frames[-1]
+    assert world._pothole_jolt(True, "e2", 0.1)        # next potholed edge
+    assert not world._pothole_jolt(False, "e3", 0.1)
+    assert world._pothole_jolt(True, "e1", 0.1)        # re-entry jolts again
+
+
+def test_narrow_fork_follows_the_route():
+    """Two legal branches a few metres apart: the route's one wins; a branch
+    well clear of the route's is left to the fly."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "a"
+    world._route_edges = ["a", "route"]
+    world._reachable = lambda e: ({"route", "loop"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"route": [(3.0, 0.0), (3.0, 50.0)], "far": [(30.0, 0.0), (30.0, 50.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    edge, pos, _xy = world._connected_snap(10.0, 0.0, "loop")   # lat=y, lon=x
+    assert edge == "route" and abs(pos - 10.0) < 1e-6, (edge, pos)
+    shapes["route"] = shapes["far"]
+    assert world._connected_snap(10.0, 0.0, "loop") is None     # fly's call
+    world._route_edges = ["a", "loop"]
+    assert world._connected_snap(10.0, 0.0, "loop") is None     # on route
+
+
+def test_edge_end_hands_over_across_a_gap():
+    """Clamped at the end of a ramp whose successor starts 9 m on: the
+    successor takes over instead of the ramp's end pinning the fly."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "ramp"
+    world._route_edges = []
+    world._reachable = lambda e: ({"next"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"ramp": [(0.0, 0.0), (0.0, 94.0)], "next": [(0.0, 103.0), (0.0, 110.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    edge, pos, _xy = world._connected_snap(95.0, 0.0, "ramp")   # 1 m past end
+    assert edge == "next" and pos == 0.0, (edge, pos)
+    assert world._connected_snap(50.0, 0.0, "ramp") is None     # mid-ramp
+
+
+def test_edge_end_hands_over_to_the_route():
+    """Off the end of an edge: the route's successor 9 m on beats a
+    connector 5 m away that leads back (the 34-lap loop, 2026-10-03)."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "e2"
+    world._route_edges = ["e2", "e4"]
+    world._reachable = lambda e: ({"e4", "back"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"e2": [(0.0, 0.0), (0.0, 88.0)],
+              "e4": [(0.0, 97.0), (0.0, 150.0)],
+              "back": [(5.0, 88.0), (40.0, 88.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    edge, _pos, _xy = world._connected_snap(89.0, 0.0, "e2")
+    assert edge == "e4", edge
+
+
+def test_eases_off_for_a_sharp_turn():
+    from types import SimpleNamespace
+
+    from dipteran.navigator import MotorOutput
+    from dipteran.world import TURN_SPEED_FLOOR, VehicleState, World
+
+    def speed_after(error_deg):
+        world = World.__new__(World)
+        world.state = VehicleState(lat=12.9, lon=77.6, heading=0.0,
+                                   heading_error_deg=error_deg)
+        world.v = SimpleNamespace(
+            steer_smoothing_s=0.0, steer_bias_tau_s=0.0, steer_scale=1.0,
+            throttle_scale=1.0, max_turn_deg_s=0.0, max_speed_ms=10.0,
+            max_accel_ms2=100.0, brake_ms2=100.0, kerb_turn_deg_s=0.0,
+            steer_right_gain=1.0, stall_window_s=5.0)
+        world._calibrating = 0
+        world._steer_rest = 0.0
+        world.traci = SimpleNamespace()
+        world._pull_to_road = lambda lat, lon, dt: (lat, lon)
+        world.apply(MotorOutput(throttle=1.0), 0.1)
+        return world.state.speed
+
+    assert abs(speed_after(0.0) - 10.0) < 1e-9
+    assert abs(speed_after(60.0) - 5.0) < 1e-9
+    assert abs(speed_after(170.0) - 10.0 * TURN_SPEED_FLOOR) < 1e-9
+
+
+def test_repeat_fork_widens_the_window():
+    """Route branch 12 m off: first pass is the fly's call, a repeat lap
+    through the same edge gets the route's branch."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "a"
+    world._route_edges = ["a", "route"]
+    world._reachable = lambda e: ({"route", "loop"}, set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    world._lane_shape = lambda e: {"route": [(12.0, 0.0), (12.0, 50.0)]}.get(e)
+
+    assert world._connected_snap(10.0, 0.0, "loop") is None
+    world._visits = {"a": 2}
+    edge, _pos, _xy = world._connected_snap(10.0, 0.0, "loop")
+    assert edge == "route", edge
+
+
+def test_dead_end_branch_is_not_taken():
+    """Off-route branch with no successors: the through branch 5 m away
+    wins. On the route, a dead end is still allowed (it is the goal)."""
+    from types import SimpleNamespace
+
+    from dipteran.world import World
+
+    world = World.__new__(World)
+    world.v = SimpleNamespace(lane_keep_m=8.0)
+    world._last_normal_edge = "a"
+    world._route_edges = ["a", "far"]
+    reach = {"a": ({"blind", "through", "far"}, set(), set()),
+             "blind": (set(), set(), set())}
+    world._reachable = lambda e: reach.get(e, ({"x"}, set(), set()))
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    world._lane_shape = lambda e: {"through": [(5.0, 0.0), (5.0, 50.0)],
+                                   "far": [(90.0, 0.0), (90.0, 50.0)]}.get(e)
+
+    edge, _pos, _xy = world._connected_snap(10.0, 0.0, "blind")
+    assert edge == "through", edge
+    world._route_edges = ["a", "blind"]
+    assert world._connected_snap(10.0, 0.0, "blind") is None
+
+
+def test_dead_end_turns_round():
+    """Pinned at the end of an edge with no successors: heading flips and
+    the lane becomes the reverse carriageway. Mid-edge, nothing happens."""
+    from types import SimpleNamespace
+
+    from dipteran.world import VehicleState, World
+
+    world = World.__new__(World)
+    world.state = VehicleState(lat=30.5, lon=0.0, heading=240.0, speed=3.5,
+                               realised_speed_ms=0.0, edge="-800628086")
+    world._reachable = lambda e: (set(), set(), set())
+    world.traci = SimpleNamespace(simulation=SimpleNamespace(
+        convertGeo=lambda lon, lat, fromGeo: (lon, lat)))
+    shapes = {"-800628086": [(0.0, 0.0), (0.0, 31.0)],
+              "800628086": [(0.0, 31.0), (0.0, 0.0)]}
+    world._lane_shape = lambda e: shapes.get(e)
+
+    world._turn_at_dead_end()
+    assert world.state.heading == 60.0, world.state.heading
+    assert world._last_normal_edge == "800628086"
+
+    world.state.lat, world.state.heading = 10.0, 240.0
+    world._turn_at_dead_end()
+    assert world.state.heading == 240.0
 
 
 def main() -> int:

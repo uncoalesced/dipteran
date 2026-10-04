@@ -292,6 +292,15 @@ vehicle:
   kerb_turn_deg_s: 60.0
   # Seconds of net displacement the stall timer judges progress over.
   stall_window_s: 5.0
-  # Right-turn gain: probe_diagnostics Test F, DNa02 R-L swings +14.2 Hz
-  # right against -26.1 Hz left from the balanced point, 26.1 / 14.2 = 1.84.
-  steer_right_gain: 1.84
+  # Manual right-turn multiplier on top of the live per-side fit
+  # (World._steer_fit). The static probe (Test F) suggested 1.84, but live
+  # the right side proved the stronger one, so this stays at 1.0.
+  steer_right_gain: 1.0
+  # Heading errors inside this window feed the live steering fit.
+  steer_fit_window_deg: 60.0
+  # A fly within this many metres of a lane it connects to is kept there
+  # rather than snapped onto an overlapping, unconnected road (flyovers,
+  # the opposite carriageway). World._connected_snap.
+  lane_keep_m: 8.0
+  # Stuck this long with the motor open and lane-keeping releases for 5 s.
+  lane_keep_release_s: 10.0

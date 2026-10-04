@@ -201,6 +201,15 @@ class Vehicle(BaseModel):
     # Extra gain on right turns, from the per-side authority Test F
     # measures -- see `World.apply`. 1.0 is symmetric.
     steer_right_gain: float = Field(default=1.0, gt=0.0)
+    # Heading errors beyond this are left out of the live steering fit --
+    # see `World._steer_fit`.
+    steer_fit_window_deg: float = Field(default=60.0, gt=0.0)
+    # How far a fly may be from a lane it is connected to before a snap onto
+    # an unconnected road is allowed -- see `World._connected_snap`.
+    lane_keep_m: float = Field(default=8.0, gt=0.0)
+    # Seconds of no net progress, motor open, before lane-keeping lets go
+    # for 5 s -- see `World._connected_snap`.
+    lane_keep_release_s: float = Field(default=10.0, gt=0.0)
 
 
 class Snn(BaseModel):
