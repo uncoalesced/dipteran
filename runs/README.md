@@ -40,6 +40,7 @@ name. The commit that added each run describes it.
 | [silkboard_tinfactory_2026-09-28](silkboard_tinfactory_2026-09-28.md) | **FAILED, 324 m short at best, circling the goal** | 0/1 (150 min) | **324.4** (ended 355.4) | **10,263.1** | 33,983.1 |
 | silkboard_tinfactory_2026-10-02 (`5162418`) | FAILED, looped 5.7 km out (regression; see ladder) | 0/1 (150 min) | 5,633.8 | 4,953.7 | 32,361.3 |
 | [ladder_tinfactory_2026-10-02](ladder_tinfactory_2026-10-02.md) | **SUCCESS on 3.2 km -> Tin Factory (19.8 m)** after pothole + fork fixes | 1/1 | 19.8 | -- | 3,733 |
+| [silkboard_tinfactory_2026-10-03](silkboard_tinfactory_2026-10-03.md) (`61a5e03`) | **SUCCESS, ARRIVED 19.9 m** | 1/1 (~2 h) | 19.9 | -- | 20,465+ |
 
 "Closest" is `distance_min_m` and "closed" is `closed_m`, from the run JSON;
 in multi-episode runs they come from the last episode.
